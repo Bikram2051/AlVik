@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+  <title>DeepSeek V4 Pro — Personal Chat</title>
+  <!-- Markdown & Syntax Highlighting -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <style>
+    :root {
+      --bg: #f0f2f5;
+      --surface: #ffffff;
+      --sidebar-bg: #f8f9fa;
+      --text: #1a1a2e;
+      --text-secondary: #555;
+      --accent: #6c5ce7;
+      --accent-light: #a29bfe;
+      --border: #d1d5db;
+      --user-bubble: #6c5ce7;
+      --assistant-bubble: #f3f4f6;
+      --hover: #e5e7eb;
+      --shadow: 0 4px 12px rgba(0,0,0,0.05);
+    }
+    [data-theme="dark"] {
+      --bg: #0f0f1a;
+      --surface: #1a1a2e;
+      --sidebar-bg: #13132b;
+      --text: #eaeaea;
+      --text-secondary: #a0a0b0;
+      --border: #3a3a5c;
+      --user-bubble: #7b2ff7;
+      --assistant-bubble: #2a2a40;
+      --hover: #2a2a40;
+      --shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh; display: flex; overflow: hidden;
+    }
+    /* Sidebar */
+    .sidebar {
+      width: 280px; background: var(--sidebar-bg);
+      border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; padding: 1.2rem; gap: 1.2rem;
+      transition: transform 0.3s ease; z-index: 10;
+    }
+    .sidebar-header { display: flex; justify-content: space-between; align-items: center; }
+    .sidebar-header h2 { font-size: 1.1rem; font-weight: 600; color: var(--accent); }
+    .theme-toggle { background: none; border: 1px solid var(--border); border-radius: 50%;
+      width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;
+      cursor: pointer; font-size: 1.2rem; color: var(--text); transition: 0.2s; }
+    .theme-toggle:hover { background: var(--hover); }
+    .branch-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; }
+    .branch-item { padding: 0.7rem 0.8rem; border-radius: 8px; cursor: pointer;
+      border: 1px solid transparent; transition: 0.15s; font-size: 0.9rem;
+      display: flex; justify-content: space-between; align-items: center;
+      color: var(--text-secondary); }
+    .branch-item:hover { background: var(--hover); border-color: var(--border); }
+    .branch-item.active { background: var(--accent); color: white; border-color: var(--accent); }
+    .branch-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .delete-branch { background: none; border: none; color: inherit; cursor: pointer;
+      padding: 0 0.3rem; opacity: 0.6; font-size: 1rem; }
+    .delete-branch:hover { opacity: 1; }
+    .new-branch-btn { width: 100%; padding: 0.6rem; background: var(--surface);
+      border: 1px dashed var(--border); border-radius: 8px; cursor: pointer;
+      color: var(--text-secondary); font-size: 0.85rem; transition: 0.2s; }
+    .new-branch-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .memory-panel { border-top: 1px solid var(--border); padding-top: 0.8rem; }
+    .memory-panel label { font-size: 0.8rem; color: var(--text-secondary); display: block; margin-bottom: 0.3rem; }
+    .memory-input { width: 100%; background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; padding: 0.5rem; color: var(--text); font-family: monospace;
+      font-size: 0.8rem; resize: vertical; margin-bottom: 0.5rem; }
+    .memory-input:focus { outline: none; border-color: var(--accent); }
+    .save-memory-btn { width: 100%; padding: 0.4rem; background: var(--accent); color: white;
+      border: none; border-radius: 6px; cursor: pointer; font-size: 0.8rem; }
+    /* Main Chat Area */
+    .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .chat-header { padding: 1rem 1.5rem; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center; }
+    .chat-header h1 { font-size: 1.3rem; background: linear-gradient(135deg, var(--accent-light), var(--accent));
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .chat-box { flex: 1; overflow-y: auto; padding: 1.5rem; display: flex; flex-direction: column; gap: 1.2rem; }
+    .message { display: flex; flex-direction: column; max-width: 80%; animation: fadeIn 0.3s ease; }
+    .message.user { align-self: flex-end; }
+    .message.assistant { align-self: flex-start; }
+    .bubble { padding: 0.8rem 1rem; border-radius: 18px; line-height: 1.5; word-wrap: break-word; white-space: pre-wrap; }
+    .user .bubble { background: var(--user-bubble); color: white; border-bottom-right-radius: 4px; box-shadow: var(--shadow); }
+    .assistant .bubble { background: var(--assistant-bubble); border-bottom-left-radius: 4px; border: 1px solid var(--border); }
+    .typing-indicator { display: inline-block; width: 60px; }
+    .typing-indicator span { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: var(--accent); margin: 0 1px; animation: bounce 1.4s infinite ease-in-out; }
+    .typing-indicator span:nth-child(2) { animation-delay: 0.16s; }
+    .typing-indicator span:nth-child(3) { animation-delay: 0.32s; }
+    @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+    @keyframes fadeIn { from { opacity:0; transform: translateY(8px); } to { opacity:1; transform: translateY(0); } }
+    .input-area { padding: 1rem 1.5rem; border-top: 1px solid var(--border); display: flex; gap: 0.5rem; }
+    #userInput { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 0.8rem 1rem; color: var(--text); font-size: 1rem; outline: none; }
+    #userInput:focus { border-color: var(--accent); }
+    .send-btn { background: var(--accent); border: none; color: white; border-radius: 12px;
+      padding: 0 1.8rem; font-weight: 600; cursor: pointer; transition: 0.2s; }
+    .send-btn:hover { background: var(--accent-light); }
+    pre { background: #0d0d1a; padding: 1rem; border-radius: 8px; overflow-x: auto; margin: 0.5rem 0; border: 1px solid var(--border); }
+    code { font-family: 'Fira Code', monospace; font-size: 0.9rem; }
+    :not(pre) > code { background: #2a2a40; padding: 0.2em 0.4em; border-radius: 4px; }
+    @media (max-width: 700px) {
+      .sidebar { position: fixed; left: 0; top: 0; bottom: 0; transform: translateX(-100%); }
+      .sidebar.open { transform: translateX(0); }
+    }
+  </style>
+</head>
+<body>
+  <!-- Sidebar -->
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <h2>💬 Branches</h2>
+      <button class="theme-toggle" id="themeToggle" title="Toggle theme">🌙</button>
+    </div>
+    <div class="branch-list" id="branchList"></div>
+    <button class="new-branch-btn" id="newBranchBtn">+ New Conversation</button>
+    <div class="memory-panel">
+      <label for="memoryInput">📝 Writing Style Memory (persists across sessions)</label>
+      <textarea class="memory-input" id="memoryInput" rows="3" placeholder="e.g., Respond as a friendly pirate, use emojis, keep code examples in Python..."></textarea>
+      <button class="save-memory-btn" id="saveMemoryBtn">Save Memory</button>
+    </div>
+  </div>
+
+  <!-- Main Chat -->
+  <div class="main">
+    <div class="chat-header">
+      <h1>🧠 DeepSeek V4 Pro</h1>
+      <button class="theme-toggle" id="menuToggle" title="Toggle sidebar" style="display:none;">☰</button>
+    </div>
+    <div class="chat-box" id="chatBox"></div>
+    <div class="input-area">
+      <input type="text" id="userInput" placeholder="Ask me anything..." onkeydown="if(event.key==='Enter' && !event.shiftKey) sendMessage()">
+      <button class="send-btn" onclick="sendMessage()">➤</button>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script>
+    // ================= CONFIGURATION =================
+    const PROXY_URL = 'deepseekv4pro.vikrambhattarai1994.workers.dev';
+    const PASSWORD = 'Power@56789';
+
+    // ================= PASSWORD GATE =================
+    if (!sessionStorage.getItem('auth')) {
+      const pw = prompt('Enter password:');
+      if (pw !== PASSWORD) { document.body.innerHTML = '<h2 style="color:white; text-align:center; margin-top:30vh;">Access Denied</h2>'; throw new Error('Unauthorized'); }
+      sessionStorage.setItem('auth', 'true');
+    }
+
+    // ================= STATE =================
+    let branches = JSON.parse(localStorage.getItem('deepseek_branches') || '{}');
+    let activeBranchId = localStorage.getItem('deepseek_active_branch') || null;
+    // Ensure at least one branch exists
+    if (Object.keys(branches).length === 0 || !activeBranchId) {
+      const defaultId = Date.now().toString();
+      branches[defaultId] = { name: 'Main Chat', messages: [] };
+      activeBranchId = defaultId;
+      localStorage.setItem('deepseek_branches', JSON.stringify(branches));
+      localStorage.setItem('deepseek_active_branch', activeBranchId);
+    }
+    let activeBranch = branches[activeBranchId];
+    let messages = activeBranch.messages;
+
+    // Theme
+    const savedTheme = localStorage.getItem('theme') || 'light';
+    document.documentElement.setAttribute('data-theme', savedTheme);
+    document.getElementById('themeToggle').textContent = savedTheme === 'dark' ? '☀️' : '🌙';
+
+    // Marked.js setup
+    marked.setOptions({ highlight: function(code, lang) { const language = hljs.getLanguage(lang) ? lang : 'plaintext'; return hljs.highlight(code, { language }).value; }, breaks: true, gfm: true });
+
+    // ================= FUNCTIONS =================
+    function renderSidebar() {
+      const list = document.getElementById('branchList');
+      list.innerHTML = '';
+      Object.entries(branches).forEach(([id, branch]) => {
+        const div = document.createElement('div');
+        div.className = `branch-item ${id === activeBranchId ? 'active' : ''}`;
+        div.innerHTML = `<span class="branch-name">${escapeHtml(branch.name)}</span>`;
+        if (id !== activeBranchId) {
+          const del = document.createElement('button');
+          del.className = 'delete-branch'; del.textContent = '×';
+          del.onclick = (e) => { e.stopPropagation(); deleteBranch(id); };
+          div.appendChild(del);
+        }
+        div.onclick = () => switchBranch(id);
+        list.appendChild(div);
+      });
+    }
+
+    function switchBranch(id) {
+      // Save current branch state
+      branches[activeBranchId].messages = messages;
+      localStorage.setItem('deepseek_branches', JSON.stringify(branches));
+      // Switch
+      activeBranchId = id;
+      activeBranch = branches[id];
+      messages = activeBranch.messages;
+      localStorage.setItem('deepseek_active_branch', id);
+      renderSidebar();
+      renderMessages();
+    }
+
+    function deleteBranch(id) {
+      if (Object.keys(branches).length <= 1) return; // keep at least one
+      delete branches[id];
+      if (activeBranchId === id) {
+        const firstId = Object.keys(branches)[0];
+        switchBranch(firstId);
+      } else {
+        localStorage.setItem('deepseek_branches', JSON.stringify(branches));
+        renderSidebar();
+      }
+    }
+
+    function newBranch() {
+      const name = prompt('Name this conversation:');
+      if (!name) return;
+      const id = Date.now().toString();
+      branches[id] = { name: name, messages: [] };
+      branches[activeBranchId].messages = messages; // save current
+      localStorage.setItem('deepseek_branches', JSON.stringify(branches));
+      switchBranch(id);
+    }
+
+    function escapeHtml(text) { return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+    function renderMessages() {
+      const box = document.getElementById('chatBox');
+      box.innerHTML = '';
+      messages.forEach(msg => appendMessage(msg.role, msg.content));
+      scrollToBottom();
+    }
+
+    function appendMessage(role, content) {
+      const box = document.getElementById('chatBox');
+      const msgDiv = document.createElement('div'); msgDiv.className = `message ${role}`;
+      const bubble = document.createElement('div'); bubble.className = 'bubble';
+      if (role === 'assistant') { bubble.innerHTML = marked.parse(content); bubble.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block)); }
+      else { bubble.textContent = content; }
+      msgDiv.appendChild(bubble); box.appendChild(msgDiv);
+      scrollToBottom();
+    }
+
+    function scrollToBottom() { const box = document.getElementById('chatBox'); box.scrollTop = box.scrollHeight; }
+
+    function createAssistantStreamPlaceholder() {
+      const box = document.getElementById('chatBox');
+      const msgDiv = document.createElement('div'); msgDiv.className = 'message assistant'; msgDiv.id = 'streamingMessage';
+      const bubble = document.createElement('div'); bubble.className = 'bubble';
+      bubble.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+      msgDiv.appendChild(bubble); box.appendChild(msgDiv); scrollToBottom();
+    }
+
+    function updateAssistantStreamBubble(chunk) {
+      const msgDiv = document.getElementById('streamingMessage'); if (!msgDiv) return;
+      const bubble = msgDiv.querySelector('.bubble');
+      const indicator = bubble.querySelector('.typing-indicator'); if (indicator) indicator.remove();
+      if (!bubble._rawText) bubble._rawText = '';
+      bubble._rawText += chunk;
+      bubble.innerHTML = marked.parse(bubble._rawText);
+      bubble.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+      scrollToBottom();
+    }
+
+    function finalizeStreamingAssistant() {
+      const msgDiv = document.getElementById('streamingMessage'); if (!msgDiv) return;
+      msgDiv.removeAttribute('id');
+      const bubble = msgDiv.querySelector('.bubble');
+      const finalText = bubble._rawText || '';
+      messages.push({ role: 'assistant', content: finalText });
+      branches[activeBranchId].messages = messages;
+      localStorage.setItem('deepseek_branches', JSON.stringify(branches));
+      delete bubble._rawText;
+    }
+
+    // ================= MEMORY =================
+    const memoryInput = document.getElementById('memoryInput');
+    memoryInput.value = localStorage.getItem('writing_style_memory') || '';
+
+    document.getElementById('saveMemoryBtn').addEventListener('click', () => {
+      const memory = memoryInput.value.trim();
+      localStorage.setItem('writing_style_memory', memory);
+      alert('Writing style saved! It will be included in every new message.');
+    });
+
+    function getSystemPrompt() {
+      const memory = localStorage.getItem('writing_style_memory') || '';
+      const base = 'You are a helpful assistant.';
+      return memory ? `${base}\n\n[User's Writing Style & Preferences]:\n${memory}` : base;
+    }
+
+    // ================= SEND MESSAGE =================
+    async function sendMessage() {
+      const input = document.getElementById('userInput'); const text = input.value.trim();
+      if (!text) return;
+      input.value = ''; input.focus();
+
+      messages.push({ role: 'user', content: text });
+      appendMessage('user', text);
+      branches[activeBranchId].messages = messages;
+      localStorage.setItem('deepseek_branches', JSON.stringify(branches));
+
+      createAssistantStreamPlaceholder();
+
+      // Build messages array with system prompt containing memory
+      const apiMessages = [{ role: 'system', content: getSystemPrompt() }, ...messages];
+
+      try {
+        const response = await fetch(PROXY_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: apiMessages }) });
+        if (!response.ok) throw new Error('API error');
+        const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read(); if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n'); buffer = lines.pop();
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const data = line.slice(6).trim(); if (data === '[DONE]') continue;
+            try { const parsed = JSON.parse(data); const delta = parsed.choices?.[0]?.delta?.content; if (delta) updateAssistantStreamBubble(delta); } catch(e) {}
+          }
+        }
+        finalizeStreamingAssistant();
+      } catch (error) {
+        const msgDiv = document.getElementById('streamingMessage'); if (msgDiv) msgDiv.remove();
+        const errMsg = '❌ Sorry, an error occurred. Please try again.';
+        messages.push({ role: 'assistant', content: errMsg }); appendMessage('assistant', errMsg);
+        branches[activeBranchId].messages = messages;
+        localStorage.setItem('deepseek_branches', JSON.stringify(branches));
+      }
+    }
+
+    // ================= EVENT LISTENERS =================
+    document.getElementById('newBranchBtn').addEventListener('click', newBranch);
+    document.getElementById('themeToggle').addEventListener('click', () => {
+      const current = document.documentElement.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('theme', next);
+      document.getElementById('themeToggle').textContent = next === 'dark' ? '☀️' : '🌙';
+    });
+    // Mobile menu toggle (if needed)
+    document.getElementById('menuToggle').addEventListener('click', () => {
+      document.getElementById('sidebar').classList.toggle('open');
+    });
+
+    // ================= INIT =================
+    renderSidebar();
+    renderMessages();
+  </script>
+</body>
+</html>
