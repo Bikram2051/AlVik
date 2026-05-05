@@ -1281,7 +1281,7 @@ input, textarea { font-family: inherit; }
 <div class="toast" id="toast"></div>
 
 <!-- Markdown + syntax highlighting libs -->
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 
 <script>
@@ -1405,37 +1405,58 @@ sidebarBackdrop.addEventListener('click', () => {
 // ============================================================
 // MARKDOWN SETUP
 // ============================================================
-marked.setOptions({
-  breaks: true,
-  gfm: true,
-  highlight: (code, lang) => {
-    const language = hljs.getLanguage(lang) ? lang : 'plaintext';
-    return hljs.highlight(code, { language }).value;
-  }
-});
+// NOTE: marked v5+ removed the `highlight` option and changed the renderer
+// API to pass token objects instead of (code, infostring, escaped).
+// We do highlighting AFTER innerHTML is set (in appendMessage via
+// hljs.highlightElement on each <pre><code>), and we write a renderer that
+// works for both old and new marked APIs.
 
-// Custom renderer that wraps code blocks in our copy-able container
 const renderer = new marked.Renderer();
-const origCode = renderer.code.bind(renderer);
-renderer.code = function(code, infostring, escaped) {
-  const lang = (infostring || '').trim().split(/\s+/)[0] || 'text';
-  const html = origCode(code, infostring, escaped);
-  // Escape backticks for the data attribute
-  const safeRaw = code.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#039;');
+renderer.code = function(codeOrToken, infostring, escaped) {
+  // marked v5+: first arg is { type, raw, lang, text }
+  // marked v4 and older: (code: string, infostring: string, escaped: boolean)
+  let codeStr, langRaw;
+  if (codeOrToken && typeof codeOrToken === 'object') {
+    codeStr = codeOrToken.text != null ? codeOrToken.text : (codeOrToken.raw || '');
+    langRaw = codeOrToken.lang || '';
+  } else {
+    codeStr = codeOrToken == null ? '' : String(codeOrToken);
+    langRaw = infostring || '';
+  }
+  codeStr = String(codeStr);
+  const lang = String(langRaw).trim().split(/\s+/)[0] || 'text';
+
+  // For the data-code attribute (used by the Copy button)
+  const safeAttr = codeStr
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+
+  // For the code body — hljs will highlight it in-place after innerHTML is set
+  const safeBody = codeStr
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
   return `
     <div class="code-block">
       <div class="code-block-head">
         <span>${escapeHtml(lang)}</span>
-        <button class="code-copy-btn" data-code="${safeRaw}">
+        <button class="code-copy-btn" data-code="${safeAttr}">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
           <span>Copy</span>
         </button>
       </div>
-      ${html}
+      <pre><code class="language-${escapeHtml(lang)}">${safeBody}</code></pre>
     </div>
   `;
 };
-marked.setOptions({ renderer });
+
+marked.setOptions({
+  breaks: true,
+  gfm: true,
+  renderer
+});
 
 // ============================================================
 // HELPERS
@@ -1761,10 +1782,8 @@ function appendMessage(role, content, isLastAssistant = false, attachments = nul
 function wireCodeCopy(scope) {
   scope.querySelectorAll('.code-copy-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      const code = btn.dataset.code
-        .replace(/&amp;/g,'&')
-        .replace(/&quot;/g,'"')
-        .replace(/&#039;/g,"'");
+      // dataset.code is already decoded by the browser — no manual decode needed
+      const code = btn.dataset.code || '';
       navigator.clipboard.writeText(code).then(() => {
         btn.classList.add('copied');
         btn.querySelector('span').textContent = 'Copied';
