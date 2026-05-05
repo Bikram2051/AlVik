@@ -145,13 +145,16 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <script>
     // ================= CONFIGURATION =================
-    const PROXY_URL = 'https://deepseekv4pro.vikrambhattarai1994.workers.dev';
-    const PASSWORD = 'Power@56789';
+    const PROXY_URL = 'https://deepseekv4pro.vikrambhattarai1994.workers.dev'; // 👈 YOUR REAL WORKER URL
+    const PASSWORD = 'mySecretChat2024'; // 👈 YOUR PASSWORD
 
     // ================= PASSWORD GATE =================
     if (!sessionStorage.getItem('auth')) {
       const pw = prompt('Enter password:');
-      if (pw !== PASSWORD) { document.body.innerHTML = '<h2 style="color:white; text-align:center; margin-top:30vh;">Access Denied</h2>'; throw new Error('Unauthorized'); }
+      if (pw !== PASSWORD) {
+        document.body.innerHTML = '<h2 style="color:white; text-align:center; margin-top:30vh;">Access Denied</h2>';
+        throw new Error('Unauthorized');
+      }
       sessionStorage.setItem('auth', 'true');
     }
 
@@ -175,9 +178,16 @@
     document.getElementById('themeToggle').textContent = savedTheme === 'dark' ? '☀️' : '🌙';
 
     // Marked.js setup
-    marked.setOptions({ highlight: function(code, lang) { const language = hljs.getLanguage(lang) ? lang : 'plaintext'; return hljs.highlight(code, { language }).value; }, breaks: true, gfm: true });
+    marked.setOptions({
+      highlight: function(code, lang) {
+        const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+        return hljs.highlight(code, { language }).value;
+      },
+      breaks: true,
+      gfm: true
+    });
 
-    // ================= FUNCTIONS =================
+    // ================= SIDEBAR =================
     function renderSidebar() {
       const list = document.getElementById('branchList');
       list.innerHTML = '';
@@ -185,9 +195,12 @@
         const div = document.createElement('div');
         div.className = `branch-item ${id === activeBranchId ? 'active' : ''}`;
         div.innerHTML = `<span class="branch-name">${escapeHtml(branch.name)}</span>`;
+        // Delete button for this branch (except current active one – but we allow if not active)
         if (id !== activeBranchId) {
           const del = document.createElement('button');
-          del.className = 'delete-branch'; del.textContent = '×';
+          del.className = 'delete-branch';
+          del.textContent = '×';
+          del.title = 'Delete this conversation';
           del.onclick = (e) => { e.stopPropagation(); deleteBranch(id); };
           div.appendChild(del);
         }
@@ -210,9 +223,10 @@
     }
 
     function deleteBranch(id) {
-      if (Object.keys(branches).length <= 1) return; // keep at least one
+      if (Object.keys(branches).length <= 1) return; // keep at least one branch
       delete branches[id];
       if (activeBranchId === id) {
+        // Automatically switch to the first available branch
         const firstId = Object.keys(branches)[0];
         switchBranch(firstId);
       } else {
@@ -226,12 +240,29 @@
       if (!name) return;
       const id = Date.now().toString();
       branches[id] = { name: name, messages: [] };
-      branches[activeBranchId].messages = messages; // save current
+      branches[activeBranchId].messages = messages;
       localStorage.setItem('deepseek_branches', JSON.stringify(branches));
       switchBranch(id);
     }
 
-    function escapeHtml(text) { return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    // ================= MEMORY =================
+    document.getElementById('memoryInput').value = localStorage.getItem('writing_style_memory') || '';
+    document.getElementById('saveMemoryBtn').addEventListener('click', () => {
+      const memory = document.getElementById('memoryInput').value.trim();
+      localStorage.setItem('writing_style_memory', memory);
+      alert('Writing style saved!');
+    });
+
+    function getSystemPrompt() {
+      const memory = localStorage.getItem('writing_style_memory') || '';
+      const base = 'You are a helpful assistant.';
+      return memory ? `${base}\n\n[User\'s Writing Style & Preferences]:\n${memory}` : base;
+    }
+
+    // ================= CHAT RENDERING =================
+    function escapeHtml(text) {
+      return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
 
     function renderMessages() {
       const box = document.getElementById('chatBox');
@@ -244,95 +275,72 @@
       const box = document.getElementById('chatBox');
       const msgDiv = document.createElement('div'); msgDiv.className = `message ${role}`;
       const bubble = document.createElement('div'); bubble.className = 'bubble';
-      if (role === 'assistant') { bubble.innerHTML = marked.parse(content); bubble.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block)); }
-      else { bubble.textContent = content; }
+      if (role === 'assistant') {
+        bubble.innerHTML = marked.parse(content);
+        bubble.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+      } else {
+        bubble.textContent = content;
+      }
       msgDiv.appendChild(bubble); box.appendChild(msgDiv);
       scrollToBottom();
     }
 
-    function scrollToBottom() { const box = document.getElementById('chatBox'); box.scrollTop = box.scrollHeight; }
-
-    function createAssistantStreamPlaceholder() {
+    function scrollToBottom() {
       const box = document.getElementById('chatBox');
-      const msgDiv = document.createElement('div'); msgDiv.className = 'message assistant'; msgDiv.id = 'streamingMessage';
-      const bubble = document.createElement('div'); bubble.className = 'bubble';
-      bubble.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
-      msgDiv.appendChild(bubble); box.appendChild(msgDiv); scrollToBottom();
+      box.scrollTop = box.scrollHeight;
     }
 
-    function updateAssistantStreamBubble(chunk) {
-      const msgDiv = document.getElementById('streamingMessage'); if (!msgDiv) return;
-      const bubble = msgDiv.querySelector('.bubble');
-      const indicator = bubble.querySelector('.typing-indicator'); if (indicator) indicator.remove();
-      if (!bubble._rawText) bubble._rawText = '';
-      bubble._rawText += chunk;
-      bubble.innerHTML = marked.parse(bubble._rawText);
-      bubble.querySelectorAll('pre code').forEach(block => hljs.highlightElement(block));
+    function showLoadingIndicator() {
+      const box = document.getElementById('chatBox');
+      const msgDiv = document.createElement('div'); msgDiv.className = 'message assistant'; msgDiv.id = 'loadingMessage';
+      const bubble = document.createElement('div'); bubble.className = 'bubble';
+      bubble.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
+      msgDiv.appendChild(bubble); box.appendChild(msgDiv);
       scrollToBottom();
     }
 
-    function finalizeStreamingAssistant() {
-      const msgDiv = document.getElementById('streamingMessage'); if (!msgDiv) return;
-      msgDiv.removeAttribute('id');
-      const bubble = msgDiv.querySelector('.bubble');
-      const finalText = bubble._rawText || '';
-      messages.push({ role: 'assistant', content: finalText });
-      branches[activeBranchId].messages = messages;
-      localStorage.setItem('deepseek_branches', JSON.stringify(branches));
-      delete bubble._rawText;
-    }
-
-    // ================= MEMORY =================
-    const memoryInput = document.getElementById('memoryInput');
-    memoryInput.value = localStorage.getItem('writing_style_memory') || '';
-
-    document.getElementById('saveMemoryBtn').addEventListener('click', () => {
-      const memory = memoryInput.value.trim();
-      localStorage.setItem('writing_style_memory', memory);
-      alert('Writing style saved! It will be included in every new message.');
-    });
-
-    function getSystemPrompt() {
-      const memory = localStorage.getItem('writing_style_memory') || '';
-      const base = 'You are a helpful assistant.';
-      return memory ? `${base}\n\n[User's Writing Style & Preferences]:\n${memory}` : base;
+    function removeLoadingIndicator() {
+      const indicator = document.getElementById('loadingMessage');
+      if (indicator) indicator.remove();
     }
 
     // ================= SEND MESSAGE =================
     async function sendMessage() {
-      const input = document.getElementById('userInput'); const text = input.value.trim();
+      const input = document.getElementById('userInput');
+      const text = input.value.trim();
       if (!text) return;
-      input.value = ''; input.focus();
+      input.value = '';
+      input.focus();
 
+      // Add user message
       messages.push({ role: 'user', content: text });
       appendMessage('user', text);
       branches[activeBranchId].messages = messages;
       localStorage.setItem('deepseek_branches', JSON.stringify(branches));
 
-      createAssistantStreamPlaceholder();
-
-      // Build messages array with system prompt containing memory
-      const apiMessages = [{ role: 'system', content: getSystemPrompt() }, ...messages];
+      // Show loading indicator
+      showLoadingIndicator();
 
       try {
-        const response = await fetch(PROXY_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: apiMessages }) });
-        if (!response.ok) throw new Error('API error');
-        const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
-        while (true) {
-          const { done, value } = await reader.read(); if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n'); buffer = lines.pop();
-          for (const line of lines) {
-            if (!line.startsWith('data: ')) continue;
-            const data = line.slice(6).trim(); if (data === '[DONE]') continue;
-            try { const parsed = JSON.parse(data); const delta = parsed.choices?.[0]?.delta?.content; if (delta) updateAssistantStreamBubble(delta); } catch(e) {}
-          }
-        }
-        finalizeStreamingAssistant();
+        const apiMessages = [{ role: 'system', content: getSystemPrompt() }, ...messages];
+        const response = await fetch(PROXY_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: apiMessages })
+        });
+        if (!response.ok) throw new Error(`API error ${response.status}`);
+        const data = await response.json();
+        const reply = data.reply || '';
+        removeLoadingIndicator();
+        messages.push({ role: 'assistant', content: reply });
+        appendMessage('assistant', reply);
+        branches[activeBranchId].messages = messages;
+        localStorage.setItem('deepseek_branches', JSON.stringify(branches));
       } catch (error) {
-        const msgDiv = document.getElementById('streamingMessage'); if (msgDiv) msgDiv.remove();
+        removeLoadingIndicator();
         const errMsg = '❌ Sorry, an error occurred. Please try again.';
-        messages.push({ role: 'assistant', content: errMsg }); appendMessage('assistant', errMsg);
+        messages.push({ role: 'assistant', content: errMsg });
+        appendMessage('assistant', errMsg);
         branches[activeBranchId].messages = messages;
         localStorage.setItem('deepseek_branches', JSON.stringify(branches));
       }
@@ -346,10 +354,6 @@
       document.documentElement.setAttribute('data-theme', next);
       localStorage.setItem('theme', next);
       document.getElementById('themeToggle').textContent = next === 'dark' ? '☀️' : '🌙';
-    });
-    // Mobile menu toggle (if needed)
-    document.getElementById('menuToggle').addEventListener('click', () => {
-      document.getElementById('sidebar').classList.toggle('open');
     });
 
     // ================= INIT =================
