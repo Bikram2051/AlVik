@@ -5,8 +5,8 @@
 build step, no framework, no server of your own — open the file or host it
 on any static host (GitHub Pages, Cloudflare Pages, Netlify).
 
-**Live (GitHub Pages):** https://bikram2051.github.io/My_Assistant/ —
-deployed automatically by `.github/workflows/pages.yml` on every push.
+**Live (GitHub Pages):** https://bikram2051.github.io/alvik/ — deployed
+automatically by `.github/workflows/pages.yml` on every push to `main`.
 
 ## Features
 
@@ -65,13 +65,17 @@ deployed automatically by `.github/workflows/pages.yml` on every push.
 ## Architecture
 
 ```
-┌────────────┐  POST {messages, model,   ┌────────────────────┐   ┌──────────────┐
-│ index.html │ ─ temperature, stream …─▶ │ Cloudflare Worker  │──▶│ DeepSeek API │
-│ (any host) │ ◀─ SSE stream or JSON ─── │ (holds the API key)│◀──│              │
-└────────────┘                           └────────────────────┘   └──────────────┘
+┌────────────┐  POST /api/login {password}   ┌────────────────────┐
+│            │ ◀── signed session token ──── │                    │
+│ index.html │                               │ Cloudflare Worker  │   ┌──────────────┐
+│  (Pages)   │  POST /api/chat               │  APP_PASSWORD      │──▶│ DeepSeek API │
+│            │ ─ Bearer <token> ───────────▶ │  AUTH_SECRET       │◀──│              │
+│            │ ◀─ SSE stream or JSON ─────── │  DEEPSEEK_API_KEY  │   └──────────────┘
+└────────────┘                               └────────────────────┘
 ```
 
-The browser never sees the DeepSeek API key — it only talks to the Worker.
+Every secret lives in the Worker. The browser holds only a signed, expiring
+session token — never the password, never the API key.
 
 ## Setup
 
@@ -79,38 +83,61 @@ The browser never sees the DeepSeek API key — it only talks to the Worker.
 
 ```bash
 cd worker
-npx wrangler secret put DEEPSEEK_API_KEY   # paste your DeepSeek key
+npx wrangler secret put DEEPSEEK_API_KEY   # your DeepSeek API key
+npx wrangler secret put APP_PASSWORD       # the password you'll type to log in
+npx wrangler secret put AUTH_SECRET        # 32+ random chars, signs tokens
 npx wrangler deploy
 ```
 
-The worker supports both streaming and non-streaming requests and keeps the
-legacy `{ reply }` response shape, so an already-deployed older worker keeps
-working too (the UI just falls back to non-streaming automatically).
+Generate a good `AUTH_SECRET` with:
 
-Optionally set `ALLOWED_ORIGINS` in `wrangler.toml` to lock the proxy to your
-site's origin.
+```bash
+openssl rand -base64 48
+```
 
-### 2. Configure the client
+`ALLOWED_ORIGINS` is set in `wrangler.toml` and should list exactly the
+origins allowed to call the proxy.
 
-At the top of the `<script>` block in `index.html`:
+Verify the deploy:
+
+```bash
+curl https://alvik.<your-subdomain>.workers.dev/api/health   # -> {"ok":true,...}
+```
+
+### 2. Point the client at your Worker
+
+One line at the top of the `<script>` block in `index.html`:
 
 ```js
-const PROXY_URL = 'https://your-worker.your-subdomain.workers.dev';
-const PASSWORD  = '...';
+const PROXY_URL = 'https://alvik.your-subdomain.workers.dev';
 ```
+
+There is no password in the client — do not add one back. The deploy
+workflow fails the build if a `PASSWORD` constant or an API key reappears in
+`index.html`.
 
 ### 3. Host it
 
-Any static host works — GitHub Pages, Cloudflare Pages, Netlify — or just
-open `index.html` locally.
+Push to `main`; the workflow publishes to the `gh-pages` branch. Enable it
+once under **Settings → Pages → Deploy from a branch → `gh-pages` / root**.
 
-## Security note
+## Security model
 
-The password gate is a **client-side convenience lock**, not real
-authentication: anyone who reads the page source can see it. It keeps casual
-visitors out of your UI, but the thing that actually needs protecting — the
-API key — lives only in the Worker. For stronger protection, add a shared
-secret header check in the Worker and lock `ALLOWED_ORIGINS` down.
+| Concern | How it's handled |
+| --- | --- |
+| DeepSeek API key | Worker secret. Never sent to the browser. |
+| App password | Worker secret, compared in constant time. Never in the client or in git. |
+| Session | HMAC-SHA256 token signed by the Worker, 30-day expiry, verified on every chat request. |
+| Stolen/forged token | Rejected — signature and expiry are both checked server-side. |
+| Other sites using your proxy | Blocked by `ALLOWED_ORIGINS` (CORS). |
+| Password guessing | Per-IP rate limit on `/api/login` (best-effort) — use a strong password. |
+
+**To revoke every session immediately** (lost device, shared password),
+rotate the signing secret — all existing tokens stop working at once:
+
+```bash
+npx wrangler secret put AUTH_SECRET
+```
 
 ## Development
 

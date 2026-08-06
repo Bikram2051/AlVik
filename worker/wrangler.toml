@@ -1,10 +1,13 @@
-name = "deepseekv4pro"
+name = "alvik"
 main = "worker.js"
 compatibility_date = "2025-01-01"
 
-# Optional: restrict which sites may call the proxy.
-# [vars]
-# ALLOWED_ORIGINS = "https://yourname.github.io,https://yourdomain.com"
+# Only these origins may call the proxy. Keep this tight — it is what stops
+# another site from spending your DeepSeek credits with a stolen token.
+[vars]
+ALLOWED_ORIGINS = "https://bikram2051.github.io"
 
-# Secret (set via CLI, never commit it):
-#   wrangler secret put DEEPSEEK_API_KEY
+# Secrets — set via CLI, never committed:
+#   wrangler secret put DEEPSEEK_API_KEY   # your DeepSeek API key
+#   wrangler secret put APP_PASSWORD       # the password you type to log in
+#   wrangler secret put AUTH_SECRET        # 32+ random chars, signs session tokens
