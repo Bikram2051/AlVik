@@ -1,0 +1,13 @@
+{
+  "name": "alvik",
+  "version": "2.1.0",
+  "private": true,
+  "description": "AlVik — single-file AI chat client backed by an authenticated Cloudflare Worker proxy",
+  "scripts": {
+    "test": "node test/run.js"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,14 @@
+# Dev-only dependencies (test suite). The app itself has no build step and
+# ships as a single static index.html.
+node_modules/
+package-lock.json
+
+# Local wrangler state
+.wrangler/
+.dev.vars
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
