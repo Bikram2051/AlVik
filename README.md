@@ -1,9 +1,12 @@
-# My Assistant — Personal AI Chat
+# AlVik — Personal AI Chat
 
-A fast, fully-equipped, single-file AI chat client (`index.html`) backed by a
-Cloudflare Worker proxy to the DeepSeek API. No build step, no framework, no
-server of your own — open the file or host it on any static host (GitHub
-Pages, Cloudflare Pages, Netlify).
+**AlVik** is a fast, fully-equipped, single-file AI chat client
+(`index.html`) backed by a Cloudflare Worker proxy to the DeepSeek API. No
+build step, no framework, no server of your own — open the file or host it
+on any static host (GitHub Pages, Cloudflare Pages, Netlify).
+
+**Live (GitHub Pages):** https://bikram2051.github.io/My_Assistant/ —
+deployed automatically by `.github/workflows/pages.yml` on every push.
 
 ## Features
 
