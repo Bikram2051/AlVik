@@ -5,8 +5,9 @@
 build step, no framework, no server of your own — open the file or host it
 on any static host (GitHub Pages, Cloudflare Pages, Netlify).
 
-**Live (GitHub Pages):** https://bikram2051.github.io/alvik/ — deployed
+**Live (GitHub Pages):** https://bikram2051.github.io/AlVik/ — deployed
 automatically by `.github/workflows/pages.yml` on every push to `main`.
+(The path is case-sensitive: it matches the repository name.)
 
 ## Features
 

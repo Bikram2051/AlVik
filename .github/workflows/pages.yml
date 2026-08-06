@@ -51,10 +51,12 @@ jobs:
 
       - name: Publish to gh-pages
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           cd _site
           git init -q
+          # Identity must be set inside this fresh repo — it does not inherit
+          # any config from the checkout above.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -q -b gh-pages
           git add -A
           git commit -q -m "Deploy ${GITHUB_SHA::7} to GitHub Pages"
