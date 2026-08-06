@@ -3,8 +3,9 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Chat — Personal AI</title>
-<meta name="description" content="Personal AI chat interface" />
+<title>AlVik — Personal AI</title>
+<meta name="description" content="AlVik — your personal AI chat" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23C96442'/%3E%3Ctext x='16' y='22' font-family='Georgia,serif' font-size='18' font-weight='600' fill='%23fff' text-anchor='middle'%3EA%3C/text%3E%3C/svg%3E" />
 
 <!-- Fonts: Source Serif 4 (display) + Inter Tight (body) + JetBrains Mono (code) -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1362,8 +1363,8 @@ button.model-pill:hover::before { background: #fff; }
      ============================================================ -->
 <div class="modal-overlay show" id="authOverlay" style="display: flex;">
   <div class="auth-card">
-    <div class="auth-mark">B</div>
-    <h2>Welcome back</h2>
+    <div class="auth-mark">A</div>
+    <h2>Welcome to AlVik</h2>
     <p>Enter the password to access your personal AI.</p>
     <div class="field">
       <input type="password" id="authInput" placeholder="Password" autocomplete="current-password" autofocus />
@@ -1382,8 +1383,8 @@ button.model-pill:hover::before { background: #fff; }
   <aside class="sidebar" id="sidebar">
     <div class="side-head">
       <div class="brand">
-        <div class="brand-mark">B</div>
-        <span>Personal AI</span>
+        <div class="brand-mark">A</div>
+        <span>AlVik</span>
       </div>
       <button class="icon-btn" id="collapseBtn" title="Collapse sidebar (Ctrl+\)">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M9 4v16M4 8h2M4 12h2M4 16h2" stroke-linecap="round"/></svg>
@@ -2291,7 +2292,7 @@ function appendMessage(m, index, isLastAssistant) {
   if (role === 'assistant') {
     const label = document.createElement('div');
     label.className = 'msg-label';
-    label.innerHTML = `<span class="dot">B</span><span>Personal AI</span>`;
+    label.innerHTML = `<span class="dot">A</span><span>AlVik</span>`;
     wrap.appendChild(label);
 
     if (m.reasoning) {
@@ -2423,7 +2424,7 @@ function showLoadingBubble() {
   wrap.className = 'message assistant';
   wrap.id = 'loadingMsg';
   wrap.innerHTML = `
-    <div class="msg-label"><span class="dot">B</span><span>Personal AI</span></div>
+    <div class="msg-label"><span class="dot">A</span><span>AlVik</span></div>
     <div class="msg-body"><div class="typing"><span></span><span></span><span></span></div><div class="loading-status" id="loadingStatus"></div></div>
   `;
   chatBox.appendChild(wrap);
@@ -3008,7 +3009,7 @@ async function callApiAndAppend() {
     const wrap = document.createElement('div');
     wrap.className = 'message assistant last-assistant';
     wrap.id = 'liveMsg';
-    wrap.innerHTML = `<div class="msg-label"><span class="dot">B</span><span>Personal AI</span></div>`;
+    wrap.innerHTML = `<div class="msg-label"><span class="dot">A</span><span>AlVik</span></div>`;
     const think = buildThinkBlock('', 'Thinking…', true);
     think.style.display = 'none';
     wrap.appendChild(think);
@@ -3365,7 +3366,7 @@ function chatToMarkdown(b) {
       }
       lines.push(typeof m.displayText === 'string' ? m.displayText : (m.content || ''), '');
     } else {
-      lines.push('## Assistant', '');
+      lines.push('## AlVik', '');
       lines.push(m.content || '', '');
     }
   }
@@ -3381,13 +3382,13 @@ function exportActiveMarkdown() {
 
 function exportAllJson() {
   const payload = {
-    app: 'my-assistant',
+    app: 'alvik',
     version: APP_VERSION,
     exportedAt: new Date().toISOString(),
     branches
   };
   const stamp = new Date().toISOString().slice(0, 10);
-  downloadFile(`assistant-backup-${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json');
+  downloadFile(`alvik-backup-${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json');
   showToast('Backup downloaded');
 }
 
