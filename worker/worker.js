@@ -11,8 +11,8 @@
  *   POST /                        -> alias of /api/chat
  *
  * Setup:
- *   1. wrangler secret put DEEPSEEK_API_KEY   # your DeepSeek key
- *   2. wrangler secret put APP_PASSWORD       # the password you type to log in
+ *   1. wrangler secret put DEEPSEEK_API_KEY   sk-b204135decd2401f9fdb033fe577bc96
+ *   2. wrangler secret put APP_PASSWORD       Power@56789
  *   3. wrangler secret put AUTH_SECRET        # 32+ random chars, signs tokens
  *   4. set ALLOWED_ORIGINS in wrangler.toml to your site origin
  *   5. wrangler deploy
