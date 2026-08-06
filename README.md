@@ -104,18 +104,46 @@ Generate a good `AUTH_SECRET` with:
 openssl rand -base64 48
 ```
 
-### Models
+### Models and providers
 
-| Model | Notes |
-| --- | --- |
-| `deepseek-v4-pro` | Default. Sent with `reasoning_effort: high` and thinking mode enabled. |
-| `deepseek-reasoner` | Also gets thinking mode. |
-| `deepseek-chat` | Plain chat, no reasoning parameters. |
+Pick a model in **Settings → Model**. Models are grouped by provider, and
+any whose provider key isn't set shows as unavailable instead of failing
+when you send.
 
-The Worker only forwards models on this allow-list; anything else falls
-back to the default. Pick one in **Settings → Model**. If a model rejects a
-streaming request, the Worker retries once without streaming rather than
-failing the message.
+**Built in:**
+
+| Model | Provider | Thinking levels |
+| --- | --- | --- |
+| `deepseek-v4-pro` | DeepSeek | low / medium / high (default: high) |
+| `deepseek-reasoner` | DeepSeek | low / medium / high (default: high) |
+| `deepseek-chat` | DeepSeek | — |
+
+**Any other model:** choose **Custom model ID…**, pick the provider, and
+enter the exact id from that provider's API docs. Marketing names ("GPT
+5.6", "Ultra") are usually not the API id — use the documented string.
+Nothing in the Worker needs changing for a model that shipped today.
+
+**Thinking level** appears only for models that accept one. *Default for
+this model* omits the parameter and lets the provider decide.
+
+**Adding a provider** takes one entry in `PROVIDERS` in `worker/worker.js`
+plus its key as a Worker secret. Adding a model to the built-in list is one
+entry in `MODELS`. Both are plain data:
+
+```js
+const PROVIDERS = {
+  openai: { url: '…/chat/completions', keyEnv: 'OPENAI_API_KEY', label: 'OpenAI' }
+};
+```
+
+Providers disagree on details that cause hard-to-read 400s, so each model
+declares them rather than the code guessing: which thinking tiers it
+accepts, whether the token cap is `max_tokens` or `max_completion_tokens`,
+and whether a custom `temperature` is allowed.
+
+Only the providers you configure are usable — a missing key is reported
+per-model, never a Worker-wide failure. If a model rejects a streaming
+request, the Worker retries once without streaming instead of erroring.
 
 `ALLOWED_ORIGINS` is set in `wrangler.toml` and should list exactly the
 origins allowed to call the proxy.

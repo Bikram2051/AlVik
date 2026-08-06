@@ -180,10 +180,15 @@ const req = (p, opts = {}) => new Request('https://alvik.example.workers.dev' + 
   r = await call('/api/chat', { headers: good, body: JSON.stringify({ messages: Array(500).fill({ role: 'user', content: 'x' }) }) });
   check('too many messages rejected', r.status === 400);
   upstreamCalls = [];
-  r = await call('/api/chat', { headers: good, body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], model: 'gpt-4' }) });
-  check('unknown model falls back to the default',
-        JSON.parse(upstreamCalls[0].init.body).model === 'deepseek-v4-pro',
-        JSON.parse(upstreamCalls[0].init.body).model);
+  r = await call('/api/chat', { headers: good, body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], model: 'some-new-model' }) });
+  check('unknown model without a provider is rejected, not silently swapped', r.status === 400, 'got ' + r.status);
+  check('rejection explains how to fix it', (await r.json()).error.includes('provider'));
+  check('unknown model never reaches an upstream', upstreamCalls.length === 0);
+
+  upstreamCalls = [];
+  r = await call('/api/chat', { headers: good, body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }) });
+  check('omitted model uses the default',
+        JSON.parse(upstreamCalls[0].init.body).model === 'deepseek-v4-pro');
 
   console.log('\n=== Model handling (matches the previously deployed worker) ===');
   const sendModel = async (model, extra = {}) => {
@@ -214,6 +219,81 @@ const req = (p, opts = {}) => new Request('https://alvik.example.workers.dev' + 
   check('client may lower reasoning_effort', sent.reasoning_effort === 'low');
   sent = await sendModel('deepseek-v4-pro', { reasoning_effort: 'ludicrous' });
   check('invalid reasoning_effort falls back to high', sent.reasoning_effort === 'high');
+
+  console.log('\n=== Multi-provider routing ===');
+  const ENV2 = { ...ENV, OPENAI_API_KEY: 'sk-openai-test' };
+  const call2 = (p, opts) => worker.fetch(req(p, opts), ENV2);
+
+  const sendTo = async (bodyObj, env2 = true) => {
+    upstreamCalls = [];
+    const rr = await (env2 ? call2 : call)('/api/chat', {
+      headers: good,
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], ...bodyObj })
+    });
+    return { res: rr, sent: upstreamCalls[0] ? JSON.parse(upstreamCalls[0].init.body) : null, raw: upstreamCalls[0] };
+  };
+
+  let t = await sendTo({ model: 'deepseek-v4-pro' });
+  check('deepseek model routed to the deepseek endpoint',
+        t.raw.url === 'https://api.deepseek.com/chat/completions', t.raw.url);
+  check('deepseek request uses the deepseek key',
+        t.raw.init.headers.Authorization === 'Bearer sk-test-key');
+
+  t = await sendTo({ model: 'gpt-some-future-id', provider: 'openai' });
+  check('custom model routed to the openai endpoint',
+        t.raw && t.raw.url === 'https://api.openai.com/v1/chat/completions', t.raw && t.raw.url);
+  check('openai request uses the openai key',
+        t.raw.init.headers.Authorization === 'Bearer sk-openai-test');
+  check('custom model id passed through verbatim', t.sent.model === 'gpt-some-future-id');
+  check('keys are never crossed between providers',
+        !JSON.stringify(t.raw.init.headers).includes('sk-test-key'));
+
+  t = await sendTo({ model: 'gpt-x', provider: 'openai', max_tokens: 500, temperature: 0.7 });
+  check('custom model uses max_completion_tokens', t.sent.max_completion_tokens === 500,
+        JSON.stringify({ mt: t.sent.max_tokens, mct: t.sent.max_completion_tokens }));
+  check('custom model omits max_tokens', t.sent.max_tokens === undefined);
+  check('temperature suppressed where reasoning models reject it', t.sent.temperature === undefined);
+  check('deepseek still gets max_tokens and temperature',
+        (await sendTo({ model: 'deepseek-chat', max_tokens: 500, temperature: 0.7 })).sent.max_tokens === 500);
+
+  t = await sendTo({ model: 'gpt-x', provider: 'openai' });
+  check('custom model sends no reasoning_effort unless asked', t.sent.reasoning_effort === undefined);
+  check('custom model never gets deepseek extra_body', t.sent.extra_body === undefined);
+  t = await sendTo({ model: 'gpt-x', provider: 'openai', reasoning_effort: 'high' });
+  check('custom model honours a requested thinking level', t.sent.reasoning_effort === 'high');
+
+  t = await sendTo({ model: 'gpt-x', provider: 'anthropic' });
+  check('unknown provider rejected', t.res.status === 400);
+  t = await sendTo({ model: 'http://evil/x', provider: 'openai' });
+  check('malformed model id rejected', t.res.status === 400);
+
+  // Provider with no key configured must say so, not fail obscurely.
+  t = await sendTo({ model: 'gpt-x', provider: 'openai' }, false);
+  check('missing provider key returns 503', t.res.status === 503, 'got ' + t.res.status);
+  const missing = await t.res.json();
+  check('missing-key error names the secret', missing.error.includes('OPENAI_API_KEY'), missing.error);
+  check('missing key means no upstream call', upstreamCalls.length === 0);
+
+  console.log('\n=== /api/models ===');
+  r = await call2('/api/models', { headers: good });
+  check('models endpoint requires no extra setup', r.status === 200, 'got ' + r.status);
+  const cat = await r.json();
+  check('returns the model list', Array.isArray(cat.models) && cat.models.length >= 3);
+  check('marks configured providers available',
+        cat.providers.find(p => p.id === 'openai').available === true);
+  check('reports reasoning tiers per model',
+        Array.isArray(cat.models.find(m => m.id === 'deepseek-v4-pro').reasoning));
+  check('deepseek-chat reports no reasoning',
+        cat.models.find(m => m.id === 'deepseek-chat').reasoning === null);
+  check('never leaks key values',
+        !JSON.stringify(cat).includes('sk-openai-test') && !JSON.stringify(cat).includes('sk-test-key'));
+
+  r = await call2('/api/models', {});
+  check('models endpoint requires auth', r.status === 401);
+
+  r = await call('/api/models', { headers: good });
+  check('unconfigured provider shown unavailable',
+        (await r.json()).providers.find(p => p.id === 'openai').available === false);
 
   console.log('\n=== Streaming fallback ===');
   // A model that rejects stream:true must not surface as a hard error.

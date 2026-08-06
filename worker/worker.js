@@ -1,38 +1,97 @@
 /**
- * AlVik — authenticated DeepSeek proxy (Cloudflare Worker).
+ * AlVik — authenticated multi-provider LLM proxy (Cloudflare Worker).
  *
- * The browser never sees the DeepSeek API key, and the app password is a
- * Worker secret — it is never shipped to the client or committed to git.
+ * The browser never sees any API key, and the app password is a Worker
+ * secret — it is never shipped to the client or committed to git.
  *
  * Routes:
  *   GET  /api/health              -> { ok: true }            (no auth)
  *   POST /api/login  { password } -> { token, expiresAt }    (no auth)
+ *   POST /api/models              -> { models, providers }   (Bearer token)
  *   POST /api/chat                -> SSE stream or { reply, ... }  (Bearer token)
  *   POST /                        -> alias of /api/chat
  *
  * Setup — NEVER write real values here. This file is public; secrets live
  * only in Cloudflare (Dashboard -> Settings -> Variables and Secrets, or
  * the CLI below, which prompts for the value on stdin):
- *   1. wrangler secret put DEEPSEEK_API_KEY   # your DeepSeek key
- *   2. wrangler secret put APP_PASSWORD       # the password you type to log in
- *   3. wrangler secret put AUTH_SECRET        # 32+ random chars, signs tokens
+ *   1. wrangler secret put APP_PASSWORD       # the password you type to log in
+ *   2. wrangler secret put AUTH_SECRET        # 32+ random chars, signs tokens
+ *   3. a key for each provider you use:
+ *        wrangler secret put DEEPSEEK_API_KEY
+ *        wrangler secret put OPENAI_API_KEY
  *   4. set ALLOWED_ORIGINS in wrangler.toml to your site origin
  *   5. wrangler deploy
+ *
+ * Only the providers you configure are usable; the rest are reported as
+ * unavailable rather than failing the whole Worker.
  *
  * Rotating AUTH_SECRET immediately invalidates every issued session token,
  * which is the fastest way to lock everyone out if a device is lost.
  */
 
-const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions';
-const DEFAULT_MODEL = 'deepseek-v4-pro';
-const ALLOWED_MODELS = ['deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner'];
+// ============================================================
+// PROVIDERS & MODELS
+//
+// To add a model: add one entry to MODELS. To add a provider: add one
+// entry to PROVIDERS and set its key as a Worker secret. No other code
+// changes are needed.
+//
+// Model IDs must be the exact string the provider's API documents —
+// marketing names ("GPT 5.6", "Ultra") are usually not the API id. If a
+// model is not listed here it can still be used: send it with an explicit
+// `provider` and it is passed straight through (see resolveModel).
+// ============================================================
 
-// Models that take reasoning/thinking parameters. The payload shape here
-// mirrors the previously deployed worker exactly, because that shape is
-// known to work against this account's API.
-const REASONING_MODELS = ['deepseek-v4-pro', 'deepseek-reasoner'];
-const DEFAULT_REASONING_EFFORT = 'high';
-const ALLOWED_REASONING_EFFORT = ['low', 'medium', 'high'];
+const PROVIDERS = {
+  deepseek: {
+    url: 'https://api.deepseek.com/chat/completions',
+    keyEnv: 'DEEPSEEK_API_KEY',
+    label: 'DeepSeek'
+  },
+  openai: {
+    url: 'https://api.openai.com/v1/chat/completions',
+    keyEnv: 'OPENAI_API_KEY',
+    label: 'OpenAI'
+  }
+};
+
+// Per-model behaviour. Providers disagree on these details, and getting
+// them wrong is a 400 from upstream, so they are data rather than logic:
+//   reasoning        - allowed effort tiers, or null if not a reasoning model
+//   defaultReasoning - tier used when the client does not pick one
+//   thinkingExtraBody- send DeepSeek's extra_body.thinking block
+//   maxTokensParam   - 'max_tokens' or 'max_completion_tokens'
+//   allowTemperature - reasoning models often reject a custom temperature
+const MODELS = {
+  'deepseek-v4-pro': {
+    provider: 'deepseek', label: 'DeepSeek V4 Pro',
+    reasoning: ['low', 'medium', 'high'], defaultReasoning: 'high',
+    thinkingExtraBody: true, maxTokensParam: 'max_tokens', allowTemperature: true
+  },
+  'deepseek-reasoner': {
+    provider: 'deepseek', label: 'DeepSeek Reasoner',
+    reasoning: ['low', 'medium', 'high'], defaultReasoning: 'high',
+    thinkingExtraBody: true, maxTokensParam: 'max_tokens', allowTemperature: true
+  },
+  'deepseek-chat': {
+    provider: 'deepseek', label: 'DeepSeek Chat',
+    reasoning: null, maxTokensParam: 'max_tokens', allowTemperature: true
+  }
+};
+
+const DEFAULT_MODEL = 'deepseek-v4-pro';
+
+// Defaults applied to a model that is not in the table above (a custom id
+// sent with an explicit provider). Conservative: reasoning models on most
+// providers reject `max_tokens` and a non-default temperature.
+const CUSTOM_MODEL_DEFAULTS = {
+  reasoning: ['low', 'medium', 'high'],
+  defaultReasoning: null,          // omit the field unless the client asks
+  thinkingExtraBody: false,
+  maxTokensParam: 'max_completion_tokens',
+  allowTemperature: false
+};
+
 const MAX_BODY_BYTES = 2_000_000;   // 2 MB request cap
 const MAX_MESSAGES = 400;
 const MAX_TOKENS_CAP = 8192;
@@ -66,11 +125,20 @@ export default {
       return json({ error: 'Method not allowed' }, 405, cors);
     }
 
-    if (!env.DEEPSEEK_API_KEY || !env.APP_PASSWORD || !env.AUTH_SECRET) {
-      return json({ error: 'Worker is not configured. Set DEEPSEEK_API_KEY, APP_PASSWORD and AUTH_SECRET.' }, 500, cors);
+    // Auth is mandatory. Provider keys are not: you may configure only the
+    // providers you use, and a missing one is reported per-model instead of
+    // blocking the whole Worker.
+    if (!env.APP_PASSWORD || !env.AUTH_SECRET) {
+      return json({ error: 'Worker is not configured. Set APP_PASSWORD and AUTH_SECRET.' }, 500, cors);
+    }
+    if (!Object.values(PROVIDERS).some(p => env[p.keyEnv])) {
+      return json({
+        error: `No provider API key configured. Set at least one of: ${Object.values(PROVIDERS).map(p => p.keyEnv).join(', ')}.`
+      }, 500, cors);
     }
 
     if (path === '/api/login') return handleLogin(request, env, cors);
+    if (path === '/api/models') return handleModels(request, env, cors);
     if (path === '/api/chat' || path === '/') return handleChat(request, env, cors);
 
     return json({ error: 'Not found' }, 404, cors);
@@ -130,12 +198,48 @@ function recordLoginFailure(ip) {
   }
 }
 
+// ---------------------------------------------------------------- models
+
+// Lets the UI list real models and grey out any whose provider key is not
+// set, instead of failing only once a message is sent.
+async function handleModels(request, env, cors) {
+  if (!(await isAuthed(request, env))) {
+    return json({ error: 'Not authenticated' }, 401, cors);
+  }
+
+  const models = Object.entries(MODELS).map(([id, spec]) => {
+    const provider = PROVIDERS[spec.provider];
+    return {
+      id,
+      label: spec.label || id,
+      provider: spec.provider,
+      providerLabel: provider.label,
+      reasoning: spec.reasoning || null,
+      defaultReasoning: spec.defaultReasoning || null,
+      available: !!env[provider.keyEnv]
+    };
+  });
+
+  const providers = Object.entries(PROVIDERS).map(([id, p]) => ({
+    id,
+    label: p.label,
+    available: !!env[p.keyEnv],
+    keyEnv: p.keyEnv
+  }));
+
+  return json({ models, providers, defaultModel: DEFAULT_MODEL }, 200, cors);
+}
+
 // ---------------------------------------------------------------- chat
 
-async function handleChat(request, env, cors) {
+async function isAuthed(request, env) {
   const auth = request.headers.get('Authorization') || '';
   const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-  if (!token || !(await verifyToken(env.AUTH_SECRET, token))) {
+  return !!token && await verifyToken(env.AUTH_SECRET, token);
+}
+
+async function handleChat(request, env, cors) {
+  if (!(await isAuthed(request, env))) {
     return json({ error: 'Not authenticated' }, 401, cors);
   }
 
@@ -156,9 +260,18 @@ async function handleChat(request, env, cors) {
     return json({ error: 'Too many messages' }, 400, cors);
   }
 
-  const model = typeof body.model === 'string' && ALLOWED_MODELS.includes(body.model)
-    ? body.model
-    : DEFAULT_MODEL;
+  const resolved = resolveModel(body.model, body.provider);
+  if (resolved.error) {
+    return json({ error: resolved.error }, 400, cors);
+  }
+  const { model, spec, provider, providerId } = resolved;
+
+  const apiKey = env[provider.keyEnv];
+  if (!apiKey) {
+    return json({
+      error: `No API key configured for ${provider.label}. Set ${provider.keyEnv} in the Worker's secrets to use this model.`
+    }, 503, cors);
+  }
 
   const payload = {
     model,
@@ -168,28 +281,30 @@ async function handleChat(request, env, cors) {
     })),
     stream: body.stream === true
   };
-  if (Number.isFinite(body.temperature)) {
+
+  // Reasoning models on most providers reject a custom temperature.
+  if (Number.isFinite(body.temperature) && spec.allowTemperature) {
     payload.temperature = Math.min(2, Math.max(0, body.temperature));
   }
+
+  // Providers disagree on the token-limit field name.
   if (Number.isFinite(body.max_tokens) && body.max_tokens > 0) {
-    payload.max_tokens = Math.min(MAX_TOKENS_CAP, Math.floor(body.max_tokens));
+    payload[spec.maxTokensParam] = Math.min(MAX_TOKENS_CAP, Math.floor(body.max_tokens));
   }
 
-  // Reasoning models get thinking mode. `extra_body` is carried through in
-  // the same shape the previous worker sent, so behaviour matches what this
-  // account is already getting from the API.
-  if (REASONING_MODELS.includes(model)) {
-    payload.reasoning_effort = ALLOWED_REASONING_EFFORT.includes(body.reasoning_effort)
-      ? body.reasoning_effort
-      : DEFAULT_REASONING_EFFORT;
-    payload.extra_body = { thinking: { type: 'enabled' } };
+  if (spec.reasoning) {
+    const asked = typeof body.reasoning_effort === 'string' ? body.reasoning_effort : null;
+    const effort = spec.reasoning.includes(asked) ? asked : spec.defaultReasoning;
+    if (effort) payload.reasoning_effort = effort;
+    // DeepSeek-specific: mirrors the payload this account is known to accept.
+    if (spec.thinkingExtraBody) payload.extra_body = { thinking: { type: 'enabled' } };
   }
 
-  const callUpstream = (p) => fetch(DEEPSEEK_URL, {
+  const callUpstream = (p) => fetch(provider.url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${env.DEEPSEEK_API_KEY}`
+      'Authorization': `Bearer ${apiKey}`
     },
     body: JSON.stringify(p)
   });
@@ -241,6 +356,44 @@ async function handleChat(request, env, cors) {
     usage: data.usage,
     model: data.model
   }, 200, cors);
+}
+
+// Map a requested model onto a provider and a parameter profile.
+//
+// A model listed in MODELS needs no provider hint. Anything else must name
+// a known provider explicitly, which is what lets a brand-new model id be
+// used the day it ships without editing this file.
+function resolveModel(requested, requestedProvider) {
+  const id = typeof requested === 'string' ? requested.trim() : '';
+
+  if (!id) {
+    const spec = MODELS[DEFAULT_MODEL];
+    return { model: DEFAULT_MODEL, spec, provider: PROVIDERS[spec.provider], providerId: spec.provider };
+  }
+
+  const known = MODELS[id];
+  if (known) {
+    return { model: id, spec: known, provider: PROVIDERS[known.provider], providerId: known.provider };
+  }
+
+  const pid = typeof requestedProvider === 'string' ? requestedProvider.trim().toLowerCase() : '';
+  if (!pid) {
+    return { error: `Unknown model "${id}". Send a "provider" field (${Object.keys(PROVIDERS).join(', ')}) to use a model that is not in the built-in list.` };
+  }
+  if (!PROVIDERS[pid]) {
+    return { error: `Unknown provider "${pid}". Known providers: ${Object.keys(PROVIDERS).join(', ')}.` };
+  }
+  // Guard against a model id being used to reach another path or host.
+  if (!/^[A-Za-z0-9._:-]{1,100}$/.test(id)) {
+    return { error: 'Invalid model id.' };
+  }
+
+  return {
+    model: id,
+    spec: { ...CUSTOM_MODEL_DEFAULTS, provider: pid },
+    provider: PROVIDERS[pid],
+    providerId: pid
+  };
 }
 
 // ---------------------------------------------------------------- tokens
