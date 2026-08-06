@@ -48,8 +48,19 @@ deployed automatically by `.github/workflows/pages.yml` on every push.
 **Data**
 - Export the current chat as Markdown
 - Full JSON backup of every conversation, and import on any device
+- **Recently deleted** — deleting a chat is undoable. Deleted conversations go
+  to a trash that keeps them for 30 days: hit **Undo** on the toast, or
+  restore them later from Settings → Recently deleted. "Delete all
+  conversations" is undoable the same way. Backups include the trash.
 - Everything is stored locally in your browser (`localStorage`) — nothing is
   saved server-side
+
+> **Storage is per-origin.** `localStorage` is scoped to the exact origin
+> serving the page, so chats saved on one URL are not visible from another
+> (`bikram2051.github.io` vs. a Cloudflare Pages URL vs. a local `file://`
+> copy are three separate stores). The data is not lost — it is still under
+> the old origin. To move it, open the old URL, **Settings → Backup all
+> (.json)**, then **Import backup** on the new one.
 
 ## Architecture
 
