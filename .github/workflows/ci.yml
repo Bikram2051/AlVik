@@ -20,17 +20,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Reject secrets in the client
+      - name: Reject secrets anywhere in the repository
         run: |
           status=0
+          # Scan EVERY tracked file, not just index.html. A real key was once
+          # committed into a comment in worker/worker.js, which a client-only
+          # scan did not catch.
+          files=$(git ls-files)
 
-          if grep -nE "const[[:space:]]+PASSWORD[[:space:]]*=" index.html; then
-            echo "::error file=index.html::Hardcoded PASSWORD constant. The app password must be a Worker secret (APP_PASSWORD), not shipped to the browser."
+          if grep -nEI "sk-[a-zA-Z0-9]{20,}" $files; then
+            echo "::error::Looks like a live API key. Keys belong in Cloudflare Worker secrets only, never in a tracked file."
             status=1
           fi
 
-          if grep -nE "sk-[a-zA-Z0-9]{20,}" index.html; then
-            echo "::error file=index.html::Looks like an API key. Keys belong in Worker secrets only."
+          # A bare token following the secret's name is always a pasted
+          # value. Trailing comments (#) and end-of-line are fine.
+          if grep -nEI "wrangler secret put[[:space:]]+[A-Z_]+[[:space:]]+[^#[:space:]]" $files; then
+            echo "::error::A value appears after 'wrangler secret put NAME'. That command prompts for the value — never write it in the file."
+            status=1
+          fi
+
+          if grep -nE "const[[:space:]]+PASSWORD[[:space:]]*=" index.html; then
+            echo "::error file=index.html::Hardcoded PASSWORD constant. The app password must be a Worker secret (APP_PASSWORD), not shipped to the browser."
             status=1
           fi
 
@@ -42,7 +53,7 @@ jobs:
           fi
 
           if [ "$status" -eq 0 ]; then
-            echo "OK — no client-side secrets found in index.html."
+            echo "OK — no secrets found in any tracked file."
           fi
           exit "$status"
 
