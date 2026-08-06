@@ -1548,15 +1548,22 @@ button.model-pill:hover::before { background: #fff; }
       <div class="modal-section">Model</div>
       <div class="field">
         <label for="modelSelect">Model</label>
-        <select id="modelSelect">
-          <option value="deepseek-chat">DeepSeek Chat — fast, general purpose</option>
-          <option value="deepseek-reasoner">DeepSeek Reasoner — deep thinking (R1)</option>
-          <option value="__custom">Custom model ID…</option>
-        </select>
+        <select id="modelSelect"></select>
+        <div class="hint" id="modelHint"></div>
       </div>
       <div class="field" id="customModelField" style="display:none">
-        <label for="customModelInput">Custom model ID</label>
-        <input type="text" id="customModelInput" placeholder="e.g. deepseek-chat" />
+        <label for="customProviderSelect">Provider</label>
+        <select id="customProviderSelect"></select>
+        <label for="customModelInput" style="margin-top:10px">Custom model ID</label>
+        <input type="text" id="customModelInput" placeholder="exact API model id" />
+        <div class="hint">Use the exact id from the provider's API docs — not the
+          marketing name. Anything the provider accepts will work here.</div>
+      </div>
+      <div class="field" id="reasoningField" style="display:none">
+        <label for="reasoningSelect">Thinking level</label>
+        <select id="reasoningSelect"></select>
+        <div class="hint">Higher levels think longer before answering — better on
+          hard problems, slower and more expensive on easy ones.</div>
       </div>
       <div class="field">
         <label for="tempRange">Temperature</label>
@@ -1640,11 +1647,39 @@ const APP_VERSION = '2.1.0';
 // The password is NOT stored here. It is a Cloudflare Worker secret; the
 // client posts it to /api/login and gets back a short-lived signed token.
 
+// Built-in model catalogue. The Worker is the source of truth — it returns
+// the same list from /api/models along with which providers actually have a
+// key configured, and that response replaces this one at runtime.
+//
+// `reasoning` lists the thinking levels a model accepts, or null if it has
+// none. Use the Custom option to run any model id the provider supports.
 const MODELS = [
-  { id: 'deepseek-v4-pro',   label: 'DeepSeek V4 Pro' },
-  { id: 'deepseek-chat',     label: 'DeepSeek Chat' },
-  { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner' }
+  { id: 'deepseek-v4-pro',   label: 'DeepSeek V4 Pro',   provider: 'deepseek', providerLabel: 'DeepSeek',
+    reasoning: ['low', 'medium', 'high'], defaultReasoning: 'high' },
+  { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner', provider: 'deepseek', providerLabel: 'DeepSeek',
+    reasoning: ['low', 'medium', 'high'], defaultReasoning: 'high' },
+  { id: 'deepseek-chat',     label: 'DeepSeek Chat',     provider: 'deepseek', providerLabel: 'DeepSeek',
+    reasoning: null }
 ];
+
+// Populated from /api/models after sign-in.
+let modelCatalog = MODELS.slice();
+let providerCatalog = [
+  { id: 'deepseek', label: 'DeepSeek', available: true,  keyEnv: 'DEEPSEEK_API_KEY' },
+  { id: 'openai',   label: 'OpenAI',   available: false, keyEnv: 'OPENAI_API_KEY' }
+];
+
+function modelSpec(id) {
+  return modelCatalog.find(m => m.id === id) || null;
+}
+
+// Reasoning levels for the active model. A custom model has no declared
+// tiers, so offer the common set and let the provider reject what it will.
+function reasoningTiersFor(id) {
+  const spec = modelSpec(id);
+  if (spec) return spec.reasoning;
+  return ['low', 'medium', 'high'];
+}
 
 const DEFAULT_SYSTEM_PROMPT =
   'You are a helpful, knowledgeable assistant. Format answers in Markdown. ' +
@@ -1670,6 +1705,8 @@ const STORE_KEYS = {
 const DEFAULT_SETTINGS = {
   model: 'deepseek-v4-pro',
   customModel: '',
+  customProvider: 'openai',   // provider used when model is __custom
+  reasoningEffort: '',        // '' = the model's own default
   temperature: 1.0,
   maxTokens: 0,        // 0 = provider default
   streaming: true,
@@ -1714,9 +1751,50 @@ function effectiveModel() {
   }
   return settings.model;
 }
+
+// Which provider serves the active model. Only needed on the wire for a
+// custom id — the Worker already knows the built-ins.
+function effectiveProvider() {
+  if (settings.model === '__custom') {
+    return settings.customProvider || 'openai';
+  }
+  const spec = modelSpec(settings.model);
+  return spec ? spec.provider : null;
+}
+
 function modelLabel() {
-  const m = MODELS.find(x => x.id === effectiveModel());
-  return m ? m.label : effectiveModel();
+  const id = effectiveModel();
+  const spec = modelSpec(id);
+  return spec ? spec.label : id;
+}
+
+// The effort level to send, or null to let the model use its own default.
+function effectiveReasoning() {
+  const tiers = reasoningTiersFor(effectiveModel());
+  if (!tiers) return null;
+  const chosen = settings.reasoningEffort;
+  return tiers.includes(chosen) ? chosen : null;
+}
+
+// Ask the Worker what it can actually serve, so the picker reflects which
+// provider keys are configured rather than guessing.
+async function refreshModelCatalog() {
+  try {
+    const res = await fetch(`${PROXY_URL}/api/models`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken() || ''}`
+      }
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (Array.isArray(data.models) && data.models.length) modelCatalog = data.models;
+    if (Array.isArray(data.providers) && data.providers.length) providerCatalog = data.providers;
+    updateModelPill();
+  } catch {
+    // Offline or old Worker — the built-in catalogue still works.
+  }
 }
 
 // ============================================================
@@ -3400,6 +3478,8 @@ async function callApiAndAppend() {
               model,
               temperature: settings.temperature,
               stream: !!settings.streaming,
+              ...(effectiveProvider() ? { provider: effectiveProvider() } : {}),
+              ...(effectiveReasoning() ? { reasoning_effort: effectiveReasoning() } : {}),
               ...(settings.maxTokens > 0 ? { max_tokens: settings.maxTokens } : {})
             }),
             signal: currentController.signal
@@ -3838,8 +3918,111 @@ const settingsOverlay = document.getElementById('settingsOverlay');
 const nameInput = document.getElementById('nameInput');
 const memoryInput = document.getElementById('memoryInput');
 const modelSelect = document.getElementById('modelSelect');
+const modelHint = document.getElementById('modelHint');
 const customModelField = document.getElementById('customModelField');
 const customModelInput = document.getElementById('customModelInput');
+const customProviderSelect = document.getElementById('customProviderSelect');
+const reasoningField = document.getElementById('reasoningField');
+const reasoningSelect = document.getElementById('reasoningSelect');
+
+const REASONING_LABELS = {
+  minimal: 'Minimal — fastest',
+  low: 'Low — quick answers',
+  medium: 'Medium — balanced',
+  high: 'High — think hard',
+  max: 'Max — think longest'
+};
+
+// Build the model list, grouped by provider, with anything whose key is
+// missing shown as unavailable rather than silently failing on send.
+function renderModelOptions() {
+  const selected = MODELS.some(m => m.id === settings.model) ||
+                   modelCatalog.some(m => m.id === settings.model)
+    ? settings.model
+    : '__custom';
+
+  modelSelect.innerHTML = '';
+  const byProvider = new Map();
+  for (const m of modelCatalog) {
+    if (!byProvider.has(m.provider)) byProvider.set(m.provider, []);
+    byProvider.get(m.provider).push(m);
+  }
+
+  for (const [pid, list] of byProvider) {
+    const group = document.createElement('optgroup');
+    group.label = list[0].providerLabel || pid;
+    for (const m of list) {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      const bits = [];
+      if (m.reasoning) bits.push('thinking');
+      if (m.available === false) bits.push('no API key');
+      opt.textContent = m.label + (bits.length ? ` — ${bits.join(', ')}` : '');
+      opt.disabled = m.available === false;
+      group.appendChild(opt);
+    }
+    modelSelect.appendChild(group);
+  }
+
+  const custom = document.createElement('option');
+  custom.value = '__custom';
+  custom.textContent = 'Custom model ID…';
+  modelSelect.appendChild(custom);
+
+  modelSelect.value = selected;
+  if (!modelSelect.value) modelSelect.value = '__custom';
+}
+
+function renderProviderOptions() {
+  customProviderSelect.innerHTML = '';
+  for (const p of providerCatalog) {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.label + (p.available ? '' : ` — set ${p.keyEnv}`);
+    customProviderSelect.appendChild(opt);
+  }
+  customProviderSelect.value = settings.customProvider || providerCatalog[0]?.id || '';
+}
+
+// Show the thinking control only for models that actually accept one.
+function renderReasoningOptions() {
+  const id = modelSelect.value === '__custom'
+    ? (customModelInput.value.trim() || '__custom')
+    : modelSelect.value;
+  const tiers = modelSelect.value === '__custom'
+    ? ['low', 'medium', 'high']
+    : reasoningTiersFor(id);
+
+  if (!tiers) {
+    reasoningField.style.display = 'none';
+    return;
+  }
+  reasoningField.style.display = '';
+
+  const previous = settings.reasoningEffort;
+  reasoningSelect.innerHTML = '';
+  const auto = document.createElement('option');
+  auto.value = '';
+  auto.textContent = 'Default for this model';
+  reasoningSelect.appendChild(auto);
+
+  for (const tier of tiers) {
+    const opt = document.createElement('option');
+    opt.value = tier;
+    opt.textContent = REASONING_LABELS[tier] || tier;
+    reasoningSelect.appendChild(opt);
+  }
+  reasoningSelect.value = tiers.includes(previous) ? previous : '';
+}
+
+function updateModelHint() {
+  const p = providerCatalog.find(x => x.id === effectiveProvider());
+  if (p && p.available === false) {
+    modelHint.textContent = `${p.label} has no API key configured — set ${p.keyEnv} in the Worker's secrets.`;
+  } else {
+    modelHint.textContent = '';
+  }
+}
 const tempRange = document.getElementById('tempRange');
 const tempVal = document.getElementById('tempVal');
 const maxTokensInput = document.getElementById('maxTokensInput');
@@ -3851,10 +4034,13 @@ function openSettings() {
   memoryInput.value = localStorage.getItem(STORE_KEYS.memory) || '';
   applyTheme(localStorage.getItem(STORE_KEYS.theme) || 'light');
 
-  const known = MODELS.some(m => m.id === settings.model);
-  modelSelect.value = known ? settings.model : '__custom';
+  const known = modelCatalog.some(m => m.id === settings.model);
+  renderModelOptions();
+  renderProviderOptions();
   customModelInput.value = settings.customModel || (known ? '' : settings.model);
   customModelField.style.display = modelSelect.value === '__custom' ? '' : 'none';
+  renderReasoningOptions();
+  updateModelHint();
   tempRange.value = settings.temperature;
   tempVal.textContent = Number(settings.temperature).toFixed(1);
   maxTokensInput.value = settings.maxTokens > 0 ? settings.maxTokens : '';
@@ -3876,6 +4062,8 @@ function saveSettings() {
 
   settings.model = modelSelect.value;
   settings.customModel = customModelInput.value.trim();
+  settings.customProvider = customProviderSelect.value || 'openai';
+  settings.reasoningEffort = reasoningSelect.value || '';
   settings.temperature = Math.min(2, Math.max(0, parseFloat(tempRange.value) || 1.0));
   settings.maxTokens = Math.max(0, parseInt(maxTokensInput.value, 10) || 0);
   settings.streaming = !!streamToggle.checked;
@@ -3901,7 +4089,11 @@ settingsOverlay.addEventListener('click', (e) => {
 
 modelSelect.addEventListener('change', () => {
   customModelField.style.display = modelSelect.value === '__custom' ? '' : 'none';
+  renderReasoningOptions();
+  updateModelHint();
 });
+customProviderSelect.addEventListener('change', updateModelHint);
+customModelInput.addEventListener('input', renderReasoningOptions);
 tempRange.addEventListener('input', () => {
   tempVal.textContent = Number(tempRange.value).toFixed(1);
 });
@@ -3996,6 +4188,7 @@ function init() {
 
   updateModelPill();
   updateOnlineState();
+  refreshModelCatalog();   // async; the built-in list works until it lands
   renderSidebar();
   renderMessages();
   renderTrash();

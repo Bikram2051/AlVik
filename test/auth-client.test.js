@@ -100,7 +100,9 @@ const settle = (ms = 60) => new Promise(r => setTimeout(r, ms));
   const sess = win.localStorage.getItem('alvik_session');
   const r2 = boot({ storage: { alvik_session: sess } });
   check('returning user skips sign-in', r2.win.document.getElementById('app').style.visibility === 'visible');
-  check('no login call on reload', r2.calls.length === 0);
+  check('no login call on reload', !r2.calls.some(c => c.url.endsWith('/api/login')),
+        r2.calls.map(c => c.url).join(', '));
+  check('model catalogue fetched on load', r2.calls.some(c => c.url.endsWith('/api/models')));
 
   console.log('\n=== Expired session ===');
   const expired = JSON.stringify({ token: 'old.token', expiresAt: Date.now() - 1000 });
