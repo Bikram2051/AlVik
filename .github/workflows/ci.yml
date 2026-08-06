@@ -1,0 +1,61 @@
+name: CI
+
+# GitHub Pages publishes index.html directly from the main branch, so there
+# is no deploy job here. This workflow exists to stop a secret from ever
+# being committed into the client again — the app password and the DeepSeek
+# API key belong in Cloudflare Worker secrets, never in index.html.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  no-client-secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Reject secrets in the client
+        run: |
+          status=0
+
+          if grep -nE "const[[:space:]]+PASSWORD[[:space:]]*=" index.html; then
+            echo "::error file=index.html::Hardcoded PASSWORD constant. The app password must be a Worker secret (APP_PASSWORD), not shipped to the browser."
+            status=1
+          fi
+
+          if grep -nE "sk-[a-zA-Z0-9]{20,}" index.html; then
+            echo "::error file=index.html::Looks like an API key. Keys belong in Worker secrets only."
+            status=1
+          fi
+
+          # The client must reach the proxy through PROXY_URL, never carry a
+          # bearer credential of its own baked into the source.
+          if grep -nE "Authorization'?\"?[[:space:]]*:[[:space:]]*[\`'\"]Bearer sk-" index.html; then
+            echo "::error file=index.html::Hardcoded Authorization header with a key."
+            status=1
+          fi
+
+          if [ "$status" -eq 0 ]; then
+            echo "OK — no client-side secrets found in index.html."
+          fi
+          exit "$status"
+
+      - name: Check the worker keeps its auth gate
+        run: |
+          status=0
+          for needle in "APP_PASSWORD" "AUTH_SECRET" "verifyToken" "constantTimeEquals"; do
+            if ! grep -q "$needle" worker/worker.js; then
+              echo "::error file=worker/worker.js::Missing '$needle' — the authentication gate looks removed."
+              status=1
+            fi
+          done
+          if [ "$status" -eq 0 ]; then
+            echo "OK — worker authentication is in place."
+          fi
+          exit "$status"

@@ -1,4 +1,6 @@
-name = "alvik"
+# Keep this name: it must match the existing Worker so `wrangler deploy`
+# replaces it in place rather than creating a second one.
+name = "deepseekv4pro"
 main = "worker.js"
 compatibility_date = "2025-01-01"
 
