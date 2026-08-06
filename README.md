@@ -90,11 +90,32 @@ npx wrangler secret put AUTH_SECRET        # 32+ random chars, signs tokens
 npx wrangler deploy
 ```
 
+`wrangler secret put` **prompts for the value on stdin** — do not pass the
+secret as an argument, or it lands in your shell history. To script it,
+pipe instead:
+
+```bash
+printf '%s' "$MY_SECRET" | npx wrangler secret put AUTH_SECRET
+```
+
 Generate a good `AUTH_SECRET` with:
 
 ```bash
 openssl rand -base64 48
 ```
+
+### Models
+
+| Model | Notes |
+| --- | --- |
+| `deepseek-v4-pro` | Default. Sent with `reasoning_effort: high` and thinking mode enabled. |
+| `deepseek-reasoner` | Also gets thinking mode. |
+| `deepseek-chat` | Plain chat, no reasoning parameters. |
+
+The Worker only forwards models on this allow-list; anything else falls
+back to the default. Pick one in **Settings → Model**. If a model rejects a
+streaming request, the Worker retries once without streaming rather than
+failing the message.
 
 `ALLOWED_ORIGINS` is set in `wrangler.toml` and should list exactly the
 origins allowed to call the proxy.

@@ -1641,6 +1641,7 @@ const APP_VERSION = '2.1.0';
 // client posts it to /api/login and gets back a short-lived signed token.
 
 const MODELS = [
+  { id: 'deepseek-v4-pro',   label: 'DeepSeek V4 Pro' },
   { id: 'deepseek-chat',     label: 'DeepSeek Chat' },
   { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner' }
 ];
@@ -1667,7 +1668,7 @@ const STORE_KEYS = {
 };
 
 const DEFAULT_SETTINGS = {
-  model: 'deepseek-chat',
+  model: 'deepseek-v4-pro',
   customModel: '',
   temperature: 1.0,
   maxTokens: 0,        // 0 = provider default
@@ -1675,14 +1676,33 @@ const DEFAULT_SETTINGS = {
   systemPrompt: ''     // empty = DEFAULT_SYSTEM_PROMPT
 };
 
+// Declared before the call below: loadSettings() reads it, and a `const` is
+// not hoisted the way the function declaration is.
+const SETTINGS_VERSION = 2;
+
 let settings = loadSettings();
 
 function loadSettings() {
   try {
     const stored = JSON.parse(localStorage.getItem(STORE_KEYS.settings) || '{}');
-    return { ...DEFAULT_SETTINGS, ...stored };
+    const merged = { ...DEFAULT_SETTINGS, ...stored };
+
+    // v1 -> v2: the old proxy ignored the model field and always served
+    // V4 Pro, so a stored 'deepseek-chat' was never an actual choice. Now
+    // that the model is honoured, carry people onto what they were really
+    // getting instead of silently downgrading them.
+    if ((stored.v || 1) < 2) {
+      if (!stored.model || stored.model === 'deepseek-chat') {
+        merged.model = 'deepseek-v4-pro';
+      }
+      merged.v = SETTINGS_VERSION;
+      try {
+        localStorage.setItem(STORE_KEYS.settings, JSON.stringify(merged));
+      } catch {}
+    }
+    return merged;
   } catch {
-    return { ...DEFAULT_SETTINGS };
+    return { ...DEFAULT_SETTINGS, v: SETTINGS_VERSION };
   }
 }
 function persistSettings() {

@@ -22,8 +22,15 @@
  */
 
 const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions';
-const DEFAULT_MODEL = 'deepseek-chat';
-const ALLOWED_MODELS = ['deepseek-chat', 'deepseek-reasoner'];
+const DEFAULT_MODEL = 'deepseek-v4-pro';
+const ALLOWED_MODELS = ['deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner'];
+
+// Models that take reasoning/thinking parameters. The payload shape here
+// mirrors the previously deployed worker exactly, because that shape is
+// known to work against this account's API.
+const REASONING_MODELS = ['deepseek-v4-pro', 'deepseek-reasoner'];
+const DEFAULT_REASONING_EFFORT = 'high';
+const ALLOWED_REASONING_EFFORT = ['low', 'medium', 'high'];
 const MAX_BODY_BYTES = 2_000_000;   // 2 MB request cap
 const MAX_MESSAGES = 400;
 const MAX_TOKENS_CAP = 8192;
@@ -166,18 +173,42 @@ async function handleChat(request, env, cors) {
     payload.max_tokens = Math.min(MAX_TOKENS_CAP, Math.floor(body.max_tokens));
   }
 
+  // Reasoning models get thinking mode. `extra_body` is carried through in
+  // the same shape the previous worker sent, so behaviour matches what this
+  // account is already getting from the API.
+  if (REASONING_MODELS.includes(model)) {
+    payload.reasoning_effort = ALLOWED_REASONING_EFFORT.includes(body.reasoning_effort)
+      ? body.reasoning_effort
+      : DEFAULT_REASONING_EFFORT;
+    payload.extra_body = { thinking: { type: 'enabled' } };
+  }
+
+  const callUpstream = (p) => fetch(DEEPSEEK_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${env.DEEPSEEK_API_KEY}`
+    },
+    body: JSON.stringify(p)
+  });
+
   let upstream;
   try {
-    upstream = await fetch(DEEPSEEK_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${env.DEEPSEEK_API_KEY}`
-      },
-      body: JSON.stringify(payload)
-    });
+    upstream = await callUpstream(payload);
   } catch (e) {
     return json({ error: 'Upstream unreachable', detail: String(e) }, 502, cors);
+  }
+
+  // If a model rejects a streaming request, fall back to non-streaming once
+  // rather than surfacing an error the user can do nothing about.
+  if (!upstream.ok && payload.stream && upstream.status === 400) {
+    try {
+      const retry = await callUpstream({ ...payload, stream: false });
+      if (retry.ok) {
+        payload.stream = false;
+        upstream = retry;
+      }
+    } catch { /* keep the original failure below */ }
   }
 
   if (!upstream.ok) {
