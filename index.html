@@ -1453,7 +1453,7 @@ button.model-pill:hover::before { background: #fff; }
         <div class="profile-avatar" id="profileAvatar">B</div>
         <div class="profile-text">
           <div class="profile-name" id="profileName">Bikram</div>
-          <div class="profile-plan">Personal · DeepSeek</div>
+          <div class="profile-plan">AlVik · Personal</div>
         </div>
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
@@ -1634,9 +1634,11 @@ button.model-pill:hover::before { background: #fff; }
 // ============================================================
 // CONFIGURATION (do not edit unless you know what you're doing)
 // ============================================================
-const PROXY_URL   = 'https://deepseekv4pro.vikrambhattarai1994.workers.dev';
-const PASSWORD    = 'Power@56789';
-const APP_VERSION = '2.0.0';
+const PROXY_URL   = 'https://alvik.vikrambhattarai1994.workers.dev';
+const APP_VERSION = '2.1.0';
+
+// The password is NOT stored here. It is a Cloudflare Worker secret; the
+// client posts it to /api/login and gets back a short-lived signed token.
 
 const MODELS = [
   { id: 'deepseek-chat',     label: 'DeepSeek Chat' },
@@ -1660,7 +1662,8 @@ const STORE_KEYS = {
   theme:     'theme',
   name:      'display_name',
   collapsed: 'sidebar_collapsed',
-  settings:  'assistant_settings'
+  settings:  'assistant_settings',
+  session:   'alvik_session'
 };
 
 const DEFAULT_SETTINGS = {
@@ -1712,20 +1715,91 @@ function unlockApp() {
   setTimeout(() => document.getElementById('userInput').focus(), 100);
 }
 
-function tryAuth() {
-  const val = authInput.value;
-  if (val === PASSWORD) {
-    sessionStorage.setItem('auth', 'true');
-    unlockApp();
-    init();
-  } else {
-    authError.textContent = 'Incorrect password. Try again.';
-    authInput.value = '';
-    authInput.focus();
+// The session token is issued and signed by the Worker. It is the only
+// credential the browser holds — the password itself is never stored.
+function saveSession(token, expiresAt) {
+  try {
+    localStorage.setItem(STORE_KEYS.session, JSON.stringify({ token, expiresAt }));
+  } catch {}
+}
+
+function getSession() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORE_KEYS.session) || 'null');
+    if (!s || typeof s.token !== 'string' || !s.token) return null;
+    if (Number.isFinite(s.expiresAt) && s.expiresAt <= Date.now()) {
+      clearSession();
+      return null;
+    }
+    return s;
+  } catch {
+    return null;
   }
 }
 
-if (sessionStorage.getItem('auth') === 'true') {
+function clearSession() {
+  try { localStorage.removeItem(STORE_KEYS.session); } catch {}
+}
+
+function authToken() {
+  const s = getSession();
+  return s ? s.token : null;
+}
+
+// Called when the Worker rejects our token — send the user back to sign in
+// without touching their conversations.
+function lockApp(message) {
+  clearSession();
+  appEl.style.visibility = 'hidden';
+  authOverlay.style.display = '';
+  authOverlay.classList.add('show');
+  authError.textContent = message || 'Your session expired. Please sign in again.';
+  authInput.value = '';
+  setTimeout(() => authInput.focus(), 50);
+}
+
+function setAuthBusy(busy) {
+  authSubmit.disabled = busy;
+  authInput.disabled = busy;
+  authSubmit.textContent = busy ? 'Signing in…' : 'Continue';
+}
+
+async function tryAuth() {
+  const val = authInput.value;
+  if (!val || authSubmit.disabled) return;
+
+  setAuthBusy(true);
+  authError.textContent = '';
+  try {
+    const res = await fetch(`${PROXY_URL}/api/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: val })
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      authError.textContent = data.error || 'Sign-in failed. Please try again.';
+      authInput.value = '';
+      authInput.focus();
+      return;
+    }
+    if (!data.token) {
+      authError.textContent = 'The server did not return a session. Check the Worker setup.';
+      return;
+    }
+
+    saveSession(data.token, data.expiresAt);
+    unlockApp();
+    init();
+  } catch {
+    authError.textContent = 'Cannot reach the server. Check your connection and try again.';
+  } finally {
+    setAuthBusy(false);
+  }
+}
+
+if (getSession()) {
   unlockApp();
 } else {
   authInput.focus();
@@ -3102,7 +3176,8 @@ function buildApiMessages(msgs) {
 }
 
 function httpErrorMessage(status) {
-  if (status === 401 || status === 403) return 'The proxy rejected the request (authentication). Check the Worker configuration.';
+  if (status === 401) return 'Your session expired. Please sign in again.';
+  if (status === 403) return 'This site is not allowed to call the proxy. Check ALLOWED_ORIGINS on the Worker.';
   if (status === 429) return 'Rate limited — too many requests. Please wait a moment.';
   if (status >= 500) return 'The proxy or upstream API had a server error.';
   return `Request failed with status ${status}.`;
@@ -3294,9 +3369,12 @@ async function callApiAndAppend() {
 
         let response;
         try {
-          response = await fetch(PROXY_URL, {
+          response = await fetch(`${PROXY_URL}/api/chat`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${authToken() || ''}`
+            },
             body: JSON.stringify({
               messages: buildApiMessages(msgs),
               model,
@@ -3311,6 +3389,14 @@ async function callApiAndAppend() {
         }
 
         if (!response.ok) {
+          // 401 means our session token is gone or expired. Retrying cannot
+          // help — bounce to the sign-in screen instead of burning attempts.
+          if (response.status === 401) {
+            const err = new Error('Your session expired. Please sign in again.');
+            err.retryable = false;
+            err.reauth = true;
+            throw err;
+          }
           const err = new Error(httpErrorMessage(response.status));
           err.retryable = response.status === 429 || response.status >= 500;
           throw err;
@@ -3422,6 +3508,8 @@ async function callApiAndAppend() {
       persistBranches();
       if (branchId === activeBranchId) renderMessages();
     }
+    // The conversation is already persisted above, so locking here is safe.
+    if (err.reauth) lockApp();
   } finally {
     isStreaming = false;
     currentController = null;
@@ -3897,7 +3985,7 @@ function init() {
   updateScrollState();
 }
 
-if (sessionStorage.getItem('auth') === 'true') {
+if (getSession()) {
   init();
 }
 
