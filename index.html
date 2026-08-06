@@ -1094,6 +1094,20 @@ input, textarea { font-family: inherit; }
   opacity: 1;
   transform: translateX(-50%) translateY(0);
 }
+.toast.has-action { pointer-events: auto; }
+.toast-action {
+  margin-left: 12px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.35);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s;
+}
+.toast-action:hover { background: rgba(255,255,255,0.15); }
 
 /* Mobile sidebar overlay */
 .sidebar-backdrop {
@@ -1286,6 +1300,36 @@ input, textarea { font-family: inherit; }
 /* Data action buttons */
 .data-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .data-actions .btn { flex: 1 1 auto; min-width: 140px; }
+
+/* Recently deleted (trash) */
+.trash-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 10px;
+}
+.trash-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+}
+.trash-item-main { flex: 1 1 auto; min-width: 0; }
+.trash-item-name {
+  font-size: 0.88rem;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.trash-item-meta { font-size: 0.72rem; color: var(--muted); margin-top: 2px; }
+.trash-item .btn { padding: 5px 10px; font-size: 0.78rem; flex: 0 0 auto; }
+.trash-empty { font-size: 0.85rem; color: var(--muted); padding: 10px 0; }
 
 /* Voice input recording state */
 .composer-attach.recording {
@@ -1555,6 +1599,16 @@ button.model-pill:hover::before { background: #fff; }
         <input type="file" id="importFile" accept="application/json,.json" style="display:none" />
         <div class="hint">Backups include every conversation and can be re-imported on any device.</div>
       </div>
+      <div class="modal-section">Recently deleted</div>
+      <div class="field">
+        <div class="trash-list" id="trashList"></div>
+        <div class="data-actions">
+          <button class="btn btn-ghost" id="restoreAllBtn">Restore all</button>
+          <button class="btn btn-danger" id="emptyTrashBtn">Empty trash</button>
+        </div>
+        <div class="hint">Deleted conversations are kept here for 30 days before they are removed automatically.</div>
+      </div>
+
       <div class="field">
         <button class="btn btn-danger" id="clearAllBtn">Delete all conversations</button>
       </div>
@@ -1601,6 +1655,7 @@ const CONTEXT_CHAR_BUDGET = 180_000;  // history chars sent per request
 const STORE_KEYS = {
   branches:  'deepseek_branches',
   active:    'deepseek_active_branch',
+  trash:     'deepseek_trash',
   memory:    'writing_style_memory',
   theme:     'theme',
   name:      'display_name',
@@ -1689,6 +1744,23 @@ try {
   branches = JSON.parse(localStorage.getItem(STORE_KEYS.branches) || '{}');
 } catch { branches = {}; }
 let activeBranchId = localStorage.getItem(STORE_KEYS.active) || null;
+
+// Deleted conversations are kept here so an accidental delete is recoverable.
+const TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;  // 30 days
+const TRASH_MAX_ENTRIES  = 50;
+let trash = [];
+try {
+  const raw = JSON.parse(localStorage.getItem(STORE_KEYS.trash) || '[]');
+  if (Array.isArray(raw)) trash = raw.filter(e => e && Array.isArray(e.messages));
+} catch { trash = []; }
+
+// Drop anything past the retention window on load
+const trashCutoff = Date.now() - TRASH_RETENTION_MS;
+const keptTrash = trash.filter(e => (Number(e.deletedAt) || 0) >= trashCutoff);
+if (keptTrash.length !== trash.length) {
+  trash = keptTrash;
+  persistTrash();
+}
 
 // Ensure every branch has the fields newer versions rely on
 for (const b of Object.values(branches)) {
@@ -1870,6 +1942,89 @@ function persistBranches() {
   }
 }
 
+function persistTrash() {
+  try {
+    localStorage.setItem(STORE_KEYS.trash, JSON.stringify(trash));
+  } catch (e) {
+    // Trash must never block a delete — drop the oldest entries and retry once.
+    console.error('Trash persist failed:', e);
+    trash = trash.slice(0, Math.max(1, Math.floor(trash.length / 2)));
+    try { localStorage.setItem(STORE_KEYS.trash, JSON.stringify(trash)); } catch {}
+  }
+}
+
+// Snapshot a conversation into the trash. Returns the trash entry.
+function moveToTrash(id, branch) {
+  const entry = {
+    id,
+    name: branch.name,
+    messages: branch.messages,
+    createdAt: branch.createdAt,
+    updatedAt: branch.updatedAt,
+    pinned: !!branch.pinned,
+    deletedAt: Date.now()
+  };
+  trash.unshift(entry);
+  if (trash.length > TRASH_MAX_ENTRIES) trash.length = TRASH_MAX_ENTRIES;
+  persistTrash();
+  return entry;
+}
+
+// Put a trashed conversation back. Keeps its original id when still free.
+function restoreFromTrash(deletedAt, opts = {}) {
+  const idx = trash.findIndex(e => e.deletedAt === deletedAt);
+  if (idx === -1) return null;
+  const [entry] = trash.splice(idx, 1);
+  persistTrash();
+
+  const id = branches[entry.id] ? `${Date.now()}_${Math.random().toString(36).slice(2, 7)}` : entry.id;
+  branches[id] = {
+    name: entry.name,
+    messages: entry.messages,
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt,
+    pinned: entry.pinned
+  };
+
+  // Drop the throwaway "New chat" that delete/clear-all left behind.
+  if (opts.replaceEmptyActive !== false) {
+    const active = branches[activeBranchId];
+    if (active && activeBranchId !== id && active.messages.length === 0) {
+      delete branches[activeBranchId];
+    }
+  }
+
+  if (opts.activate !== false) {
+    activeBranchId = id;
+    messages = branches[id].messages;
+  }
+  ensureAtLeastOneBranch();
+  persistBranches();
+  return id;
+}
+
+// Guarantee there is always an active, valid conversation.
+function ensureAtLeastOneBranch() {
+  if (!branches[activeBranchId]) {
+    const firstId = Object.keys(branches)[0];
+    if (firstId) {
+      activeBranchId = firstId;
+    } else {
+      const id = Date.now().toString();
+      branches[id] = { name: 'New chat', messages: [], createdAt: Date.now(), updatedAt: Date.now(), pinned: false };
+      activeBranchId = id;
+    }
+  }
+  messages = branches[activeBranchId].messages;
+}
+
+function refreshAfterRestore() {
+  renderSidebar();
+  renderMessages();
+  updateTopbar();
+  renderTrash();
+}
+
 function escapeHtml(text) {
   return String(text).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
@@ -1886,12 +2041,29 @@ function timeGreeting() {
   return 'Good evening';
 }
 
-function showToast(text) {
+function showToast(text, actionLabel, actionFn) {
   const t = document.getElementById('toast');
   t.textContent = text;
+  t.classList.toggle('has-action', !!actionFn);
+
+  let life = 2200;
+  if (actionFn) {
+    life = 8000;  // give the user time to notice and hit Undo
+    const btn = document.createElement('button');
+    btn.className = 'toast-action';
+    btn.type = 'button';
+    btn.textContent = actionLabel || 'Undo';
+    btn.addEventListener('click', () => {
+      clearTimeout(t._tm);
+      t.classList.remove('show', 'has-action');
+      actionFn();
+    });
+    t.appendChild(btn);
+  }
+
   t.classList.add('show');
   clearTimeout(t._tm);
-  t._tm = setTimeout(() => t.classList.remove('show'), 2200);
+  t._tm = setTimeout(() => t.classList.remove('show', 'has-action'), life);
 }
 
 function autoTitleFromText(text) {
@@ -2042,8 +2214,8 @@ function buildConvItem(id, b) {
   ren.onclick = (e) => { e.stopPropagation(); renameBranch(id); };
   actions.appendChild(ren);
 
-  // Delete
-  if (Object.keys(branches).length > 1) {
+  // Delete — offered for the last remaining chat too, since it is now undoable.
+  if (Object.keys(branches).length > 1 || branches[id].messages.length > 0) {
     const del = document.createElement('button');
     del.className = 'conv-act-btn';
     del.title = 'Delete';
@@ -2094,19 +2266,24 @@ function newBranch() {
 }
 
 function deleteBranch(id) {
-  if (Object.keys(branches).length <= 1) return;
-  if (!confirm('Delete this conversation? This cannot be undone.')) return;
+  const branch = branches[id];
+  if (!branch) return;
   if (isStreaming && id === activeBranchId) cancelStream(true);
+
+  const entry = moveToTrash(id, branch);
   delete branches[id];
-  if (activeBranchId === id) {
-    const firstId = Object.keys(branches)[0];
-    activeBranchId = firstId;
-    messages = branches[firstId].messages;
-  }
+  ensureAtLeastOneBranch();
   persistBranches();
   renderSidebar();
   renderMessages();
   updateTopbar();
+  renderTrash();
+
+  showToast('Conversation deleted', 'Undo', () => {
+    restoreFromTrash(entry.deletedAt);
+    refreshAfterRestore();
+    showToast('Conversation restored');
+  });
 }
 
 function renameBranch(id) {
@@ -3380,12 +3557,99 @@ function exportActiveMarkdown() {
   showToast('Chat exported as Markdown');
 }
 
+// ============================================================
+// RECENTLY DELETED
+// ============================================================
+function renderTrash() {
+  const list = document.getElementById('trashList');
+  if (!list) return;
+  list.innerHTML = '';
+
+  if (trash.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'trash-empty';
+    empty.textContent = 'No deleted conversations.';
+    list.appendChild(empty);
+    return;
+  }
+
+  for (const entry of trash) {
+    const row = document.createElement('div');
+    row.className = 'trash-item';
+
+    const main = document.createElement('div');
+    main.className = 'trash-item-main';
+    const name = document.createElement('div');
+    name.className = 'trash-item-name';
+    name.textContent = entry.name || 'Untitled chat';
+    const meta = document.createElement('div');
+    meta.className = 'trash-item-meta';
+    const count = entry.messages.length;
+    meta.textContent = `${count} message${count === 1 ? '' : 's'} · deleted ${relativeDay(entry.deletedAt)}`;
+    main.appendChild(name);
+    main.appendChild(meta);
+
+    const restore = document.createElement('button');
+    restore.className = 'btn btn-ghost';
+    restore.type = 'button';
+    restore.textContent = 'Restore';
+    restore.addEventListener('click', () => {
+      restoreFromTrash(entry.deletedAt);
+      refreshAfterRestore();
+      showToast('Conversation restored');
+    });
+
+    const forget = document.createElement('button');
+    forget.className = 'btn btn-danger';
+    forget.type = 'button';
+    forget.textContent = 'Delete';
+    forget.addEventListener('click', () => {
+      if (!confirm(`Permanently delete "${entry.name || 'Untitled chat'}"? This cannot be undone.`)) return;
+      trash = trash.filter(e => e.deletedAt !== entry.deletedAt);
+      persistTrash();
+      renderTrash();
+    });
+
+    row.appendChild(main);
+    row.appendChild(restore);
+    row.appendChild(forget);
+    list.appendChild(row);
+  }
+}
+
+function relativeDay(ts) {
+  const days = Math.floor((Date.now() - (Number(ts) || 0)) / 86400000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  return `${days} days ago`;
+}
+
+document.getElementById('restoreAllBtn').addEventListener('click', () => {
+  if (trash.length === 0) { showToast('Nothing to restore'); return; }
+  const stamps = trash.map(e => e.deletedAt).reverse();  // oldest first
+  for (const s of stamps) restoreFromTrash(s, { activate: false });
+  ensureAtLeastOneBranch();
+  persistBranches();
+  refreshAfterRestore();
+  showToast(`Restored ${stamps.length} conversation${stamps.length === 1 ? '' : 's'}`);
+});
+
+document.getElementById('emptyTrashBtn').addEventListener('click', () => {
+  if (trash.length === 0) { showToast('Trash is already empty'); return; }
+  if (!confirm(`Permanently delete ${trash.length} conversation${trash.length === 1 ? '' : 's'}? This cannot be undone.`)) return;
+  trash = [];
+  persistTrash();
+  renderTrash();
+  showToast('Trash emptied');
+});
+
 function exportAllJson() {
   const payload = {
     app: 'alvik',
     version: APP_VERSION,
     exportedAt: new Date().toISOString(),
-    branches
+    branches,
+    trash
   };
   const stamp = new Date().toISOString().slice(0, 10);
   downloadFile(`alvik-backup-${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json');
@@ -3426,6 +3690,27 @@ function importBackup(file) {
         branches[id] = clean;
         count++;
       }
+      // Backups also carry the trash, so a pre-deletion backup restores everything.
+      if (Array.isArray(parsed.trash)) {
+        const seen = new Set(trash.map(e => e.deletedAt));
+        for (const e of parsed.trash) {
+          if (!e || !Array.isArray(e.messages) || seen.has(e.deletedAt)) continue;
+          trash.push({
+            id: e.id || String(e.deletedAt),
+            name: typeof e.name === 'string' ? e.name : 'Untitled chat',
+            messages: e.messages,
+            createdAt: Number(e.createdAt) || Date.now(),
+            updatedAt: Number(e.updatedAt) || Date.now(),
+            pinned: !!e.pinned,
+            deletedAt: Number(e.deletedAt) || Date.now()
+          });
+        }
+        trash.sort((a, b) => b.deletedAt - a.deletedAt);
+        if (trash.length > TRASH_MAX_ENTRIES) trash.length = TRASH_MAX_ENTRIES;
+        persistTrash();
+        renderTrash();
+      }
+
       if (count === 0) throw new Error('No conversations found in the file');
       persistBranches();
       renderSidebar();
@@ -3467,6 +3752,7 @@ function openSettings() {
   maxTokensInput.value = settings.maxTokens > 0 ? settings.maxTokens : '';
   streamToggle.checked = !!settings.streaming;
   sysPromptInput.value = settings.systemPrompt || '';
+  renderTrash();
 
   settingsOverlay.classList.add('show');
   setTimeout(() => nameInput.focus(), 50);
@@ -3526,10 +3812,18 @@ document.getElementById('importFile').addEventListener('change', (e) => {
 });
 
 document.getElementById('clearAllBtn').addEventListener('click', () => {
-  if (!confirm('Delete ALL conversations? This cannot be undone.')) return;
+  const ids = Object.keys(branches);
+  const hasContent = ids.some(i => branches[i].messages.length > 0);
+  if (!hasContent) { showToast('Nothing to delete'); return; }
+  if (!confirm('Delete all conversations? They move to Recently deleted and can be restored for 30 days.')) return;
   if (isStreaming) cancelStream(true);
-  localStorage.removeItem(STORE_KEYS.branches);
-  localStorage.removeItem(STORE_KEYS.active);
+
+  const stamps = [];
+  for (const i of ids) {
+    if (branches[i].messages.length === 0) continue;  // skip empty scratch chats
+    stamps.push(moveToTrash(i, branches[i]).deletedAt);
+  }
+
   branches = {};
   const id = Date.now().toString();
   branches[id] = { name: 'New chat', messages: [], createdAt: Date.now(), updatedAt: Date.now(), pinned: false };
@@ -3539,8 +3833,17 @@ document.getElementById('clearAllBtn').addEventListener('click', () => {
   renderSidebar();
   renderMessages();
   updateTopbar();
+  renderTrash();
   closeSettings();
-  showToast('All conversations cleared');
+
+  showToast(`${stamps.length} conversation${stamps.length === 1 ? '' : 's'} moved to trash`, 'Undo', () => {
+    // Restore oldest-first so the sidebar order matches what the user had.
+    for (const s of stamps.slice().reverse()) restoreFromTrash(s, { activate: false });
+    ensureAtLeastOneBranch();
+    persistBranches();
+    refreshAfterRestore();
+    showToast('Conversations restored');
+  });
 });
 
 // ============================================================
@@ -3587,6 +3890,7 @@ function init() {
   updateOnlineState();
   renderSidebar();
   renderMessages();
+  renderTrash();
   updateTopbar();
   updateSendBtn();
   autoResize(userInput);
