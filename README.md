@@ -102,7 +102,7 @@ origins allowed to call the proxy.
 Verify the deploy:
 
 ```bash
-curl https://alvik.<your-subdomain>.workers.dev/api/health   # -> {"ok":true,...}
+curl https://deepseekv4pro.vikrambhattarai1994.workers.dev/api/health   # -> {"ok":true,...}
 ```
 
 ### 2. Point the client at your Worker
@@ -110,7 +110,7 @@ curl https://alvik.<your-subdomain>.workers.dev/api/health   # -> {"ok":true,...
 One line at the top of the `<script>` block in `index.html`:
 
 ```js
-const PROXY_URL = 'https://alvik.your-subdomain.workers.dev';
+const PROXY_URL = 'https://deepseekv4pro.vikrambhattarai1994.workers.dev';
 ```
 
 There is no password in the client — do not add one back. The deploy
@@ -119,8 +119,13 @@ workflow fails the build if a `PASSWORD` constant or an API key reappears in
 
 ### 3. Host it
 
-Push to `main`; the workflow publishes to the `gh-pages` branch. Enable it
-once under **Settings → Pages → Deploy from a branch → `gh-pages` / root**.
+GitHub Pages serves `index.html` straight from the `main` branch — set it
+once under **Settings → Pages → Deploy from a branch → `main` / root**.
+Every push to `main` republishes automatically.
+
+`.github/workflows/ci.yml` runs on each push and **fails the build if a
+password constant or an API key ever reappears in `index.html`**, so the
+old client-side-secret mistake cannot ship again.
 
 ## Security model
 
