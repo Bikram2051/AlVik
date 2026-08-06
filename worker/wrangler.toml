@@ -1,0 +1,10 @@
+name = "deepseekv4pro"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+# Optional: restrict which sites may call the proxy.
+# [vars]
+# ALLOWED_ORIGINS = "https://yourname.github.io,https://yourdomain.com"
+
+# Secret (set via CLI, never commit it):
+#   wrangler secret put DEEPSEEK_API_KEY
