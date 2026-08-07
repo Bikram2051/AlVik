@@ -262,7 +262,7 @@ const req = (p, opts = {}) => new Request('https://alvik.example.workers.dev' + 
   t = await sendTo({ model: 'gpt-x', provider: 'openai', reasoning_effort: 'high' });
   check('custom model honours a requested thinking level', t.sent.reasoning_effort === 'high');
 
-  t = await sendTo({ model: 'gpt-x', provider: 'anthropic' });
+  t = await sendTo({ model: 'gpt-x', provider: 'not-a-provider' });
   check('unknown provider rejected', t.res.status === 400);
   t = await sendTo({ model: 'http://evil/x', provider: 'openai' });
   check('malformed model id rejected', t.res.status === 400);
