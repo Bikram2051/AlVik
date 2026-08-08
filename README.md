@@ -80,15 +80,30 @@ session token — never the password, never the API key.
 
 ## Setup
 
-### 1. Deploy the Worker (`worker/`)
+### 1. Deploy the Worker
+
+Run these from the **repository root** — `wrangler.toml` lives there and
+points at `worker/worker.js`:
 
 ```bash
-cd worker
-npx wrangler secret put DEEPSEEK_API_KEY   # your DeepSeek API key
 npx wrangler secret put APP_PASSWORD       # the password you'll type to log in
 npx wrangler secret put AUTH_SECRET        # 32+ random chars, signs tokens
+npx wrangler secret put DEEPSEEK_API_KEY   # DeepSeek provider key
+npx wrangler secret put OPENAI_API_KEY     # optional, for OpenAI models
 npx wrangler deploy
 ```
+
+No Node installed? Set the secrets under **Workers & Pages → your Worker →
+Settings → Variables and Secrets** (type **Secret**), and paste
+`worker/worker.js` into **Edit Code → Deploy**.
+
+**Automatic deploys (Cloudflare Workers Builds).** Connect the repo and
+leave the root directory as `/`. The config at the root is what makes this
+work: without it wrangler falls back to interactive setup, decides the
+whole repository is a static-assets directory, and fails trying to upload
+`node_modules` (its own `workerd` binary is over the 25 MiB asset limit).
+There is deliberately no `[assets]` block — this deploys a Worker script
+only; the web client is served by GitHub Pages.
 
 `wrangler secret put` **prompts for the value on stdin** — do not pass the
 secret as an argument, or it lands in your shell history. To script it,

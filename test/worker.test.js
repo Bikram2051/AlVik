@@ -4,7 +4,7 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..');
 const INDEX_HTML = path.join(ROOT, 'index.html');
 const WORKER_JS = path.join(ROOT, 'worker', 'worker.js');
-const WRANGLER_TOML = path.join(ROOT, 'worker', 'wrangler.toml');
+const WRANGLER_TOML = path.join(ROOT, 'wrangler.toml');
 
 const fs = require('fs');
 const { webcrypto } = require('crypto');

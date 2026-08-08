@@ -1,0 +1,29 @@
+# Worker config lives at the repository root on purpose.
+#
+# Cloudflare Workers Builds runs `wrangler deploy` from the root. With no
+# config here, wrangler falls back to interactive setup, decides the whole
+# repository is a static-assets directory, and then fails trying to upload
+# node_modules (wrangler's own workerd binary is >100 MiB, over the 25 MiB
+# asset limit). Declaring the config explicitly avoids all of that.
+#
+# There is deliberately no [assets] block: this project deploys a Worker
+# script only. The web client is served separately by GitHub Pages.
+
+# Must match the existing Worker so a deploy replaces it in place rather
+# than creating a second one.
+name = "deepseekv4pro"
+main = "worker/worker.js"
+compatibility_date = "2026-08-07"
+
+# Only these origins may call the proxy. Keep this tight — it is what stops
+# another site from spending your API credits with a stolen token.
+[vars]
+ALLOWED_ORIGINS = "https://bikram2051.github.io"
+
+# Secrets are set in the Cloudflare dashboard (Settings -> Variables and
+# Secrets) or with `wrangler secret put NAME`, which prompts for the value.
+# Never write real values in this file — it is public.
+#   APP_PASSWORD       the password you type to log in
+#   AUTH_SECRET        32+ random chars, signs session tokens
+#   DEEPSEEK_API_KEY   DeepSeek provider key
+#   OPENAI_API_KEY     OpenAI provider key
