@@ -180,6 +180,64 @@ const settle = (ms = 60) => new Promise(r => setTimeout(r, ms));
   check('V4 Pro offered in the model picker',
         r10.win.eval(`MODELS.some(m => m.id === 'deepseek-v4-pro')`));
 
+  console.log('\n=== Server error messages reach the user ===');
+  // A generic "server error" hides what to fix. The Worker's own message
+  // names the missing secret, so it must survive to the transcript.
+  const r11 = boot({
+    storage: { alvik_session: sess },
+    fetchImpl: async (url) => {
+      if (url.endsWith('/api/models')) {
+        return new Response(JSON.stringify({ models: [], providers: [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        error: 'No API key configured for OpenAI. Set OPENAI_API_KEY in the Worker\'s secrets to use this model.'
+      }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+    }
+  });
+  r11.win.eval(`
+    branches = { t: {name:'T', messages:[], createdAt:Date.now(), updatedAt:Date.now(), pinned:false} };
+    activeBranchId='t'; messages=branches['t'].messages;
+    document.getElementById('userInput').value = 'ping';
+    sendMessage();
+  `);
+  await settle(300);
+  const shown = r11.win.eval(`branches['t'].messages.map(m=>m.content).join(' | ')`);
+  check('the missing-key message is shown, not a generic one',
+        shown.includes('OPENAI_API_KEY'), shown.slice(0, 160));
+  check('generic wording is not used instead',
+        !shown.includes('The proxy or upstream API had a server error'));
+  check('a 503 is not retried', r11.calls.filter(c => c.url.endsWith('/api/chat')).length === 1,
+        'attempts=' + r11.calls.filter(c => c.url.endsWith('/api/chat')).length);
+  check('app stays unlocked on a 503',
+        r11.win.document.getElementById('app').style.visibility === 'visible');
+
+  // An upstream failure should still surface the provider's own complaint.
+  const r12 = boot({
+    storage: { alvik_session: sess },
+    fetchImpl: async (url) => {
+      if (url.endsWith('/api/models')) {
+        return new Response(JSON.stringify({ models: [], providers: [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        error: 'Upstream error 400', detail: 'model "gpt-x" does not exist'
+      }), { status: 502, headers: { 'Content-Type': 'application/json' } });
+    }
+  });
+  r12.win.eval(`
+    branches = { t: {name:'T', messages:[], createdAt:Date.now(), updatedAt:Date.now(), pinned:false} };
+    activeBranchId='t'; messages=branches['t'].messages;
+    settings.streaming = false;
+    document.getElementById('userInput').value = 'ping';
+    sendMessage();
+  `);
+  // A 502 is retryable, so this waits out the full backoff chain.
+  await settle(7000);
+  const shown2 = r12.win.eval(`branches['t'].messages.map(m=>m.content).join(' | ')`);
+  check('upstream detail reaches the user', shown2.includes('does not exist'), shown2.slice(0, 200));
+  check('a 502 is retried before giving up',
+        r12.calls.filter(c => c.url.endsWith('/api/chat')).length > 1,
+        'attempts=' + r12.calls.filter(c => c.url.endsWith('/api/chat')).length);
+
   console.log('\n=== Worker unreachable ===');
   const r6 = boot({ fetchImpl: async () => { throw new TypeError('Failed to fetch'); } });
   r6.win.document.getElementById('authInput').value = GOOD_PASSWORD;

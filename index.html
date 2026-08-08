@@ -3497,8 +3497,25 @@ async function callApiAndAppend() {
             err.reauth = true;
             throw err;
           }
-          const err = new Error(httpErrorMessage(response.status));
-          err.retryable = response.status === 429 || response.status >= 500;
+          // The Worker sends an actionable message ("No API key configured
+          // for OpenAI…", the upstream's own complaint). Show that instead
+          // of a generic status description, which hides what to fix.
+          let serverMsg = '';
+          try {
+            const data = await response.json();
+            if (data && typeof data.error === 'string') {
+              serverMsg = data.error;
+              if (typeof data.detail === 'string' && data.detail.trim()) {
+                serverMsg += ` — ${data.detail.trim().slice(0, 300)}`;
+              }
+            }
+          } catch { /* not JSON; fall back to the status description */ }
+
+          const err = new Error(serverMsg || httpErrorMessage(response.status));
+          // 503 here means a provider key is missing. Retrying cannot fix
+          // that, so do not burn attempts on it.
+          err.retryable = response.status === 429 ||
+                          (response.status >= 500 && response.status !== 503);
           throw err;
         }
 
