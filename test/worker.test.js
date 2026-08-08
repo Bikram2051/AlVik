@@ -339,6 +339,143 @@ const req = (p, opts = {}) => {
   check('missing-key error names the secret', missing.error.includes('OPENAI_API_KEY'), missing.error);
   check('missing key means no upstream call', upstreamCalls.length === 0);
 
+  console.log('\n=== Anthropic dialect (Messages API is not OpenAI-compatible) ===');
+  const ENV3 = { ...ENV, ANTHROPIC_API_KEY: 'sk-ant-test' };
+  const callA = async (bodyObj) => {
+    upstreamCalls = [];
+    const rr = await worker.fetch(req('/api/chat', {
+      headers: good,
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], ...bodyObj })
+    }), ENV3);
+    const raw = upstreamCalls[0];
+    return { res: rr, sent: raw ? JSON.parse(raw.init.body) : null, raw };
+  };
+
+  let a = await callA({ model: 'claude-opus-5' });
+  check('routed to the Messages endpoint',
+        a.raw.url === 'https://api.anthropic.com/v1/messages', a.raw.url);
+  check('uses x-api-key, not Bearer',
+        a.raw.init.headers['x-api-key'] === 'sk-ant-test' && !a.raw.init.headers.Authorization,
+        JSON.stringify(a.raw.init.headers));
+  check('sends the required anthropic-version header',
+        a.raw.init.headers['anthropic-version'] === '2023-06-01');
+  check('max_tokens always present (Anthropic requires it)',
+        typeof a.sent.max_tokens === 'number' && a.sent.max_tokens > 0, String(a.sent.max_tokens));
+  check('thinking is adaptive, never budget_tokens (400 on Opus 5)',
+        a.sent.thinking.type === 'adaptive' && a.sent.thinking.budget_tokens === undefined);
+  check('thinking display opts into summaries', a.sent.thinking.display === 'summarized');
+  check('effort goes in output_config, not reasoning_effort',
+        a.sent.output_config.effort === 'high' && a.sent.reasoning_effort === undefined,
+        JSON.stringify({ oc: a.sent.output_config, re: a.sent.reasoning_effort }));
+
+  a = await callA({ model: 'claude-opus-5', temperature: 0.9 });
+  check('temperature never sent (400 on Opus 5)', a.sent.temperature === undefined);
+  a = await callA({ model: 'claude-opus-5', reasoning_effort: 'xhigh' });
+  check('xhigh effort accepted', a.sent.output_config.effort === 'xhigh');
+
+  // The system prompt must be lifted out of messages into a top-level field.
+  upstreamCalls = [];
+  await worker.fetch(req('/api/chat', {
+    headers: good,
+    body: JSON.stringify({
+      model: 'claude-opus-5',
+      messages: [
+        { role: 'system', content: 'You are terse.' },
+        { role: 'user', content: 'hi' },
+        { role: 'assistant', content: 'hello' },
+        { role: 'user', content: 'again' }
+      ]
+    })
+  }), ENV3);
+  const sentSys = JSON.parse(upstreamCalls[0].init.body);
+  check('system lifted to a top-level field', sentSys.system === 'You are terse.');
+  check('system removed from the messages array',
+        sentSys.messages.every(m => m.role !== 'system'), JSON.stringify(sentSys.messages));
+  check('conversation turns preserved in order',
+        sentSys.messages.length === 3 && sentSys.messages[2].content === 'again');
+
+  console.log('\n=== Anthropic response translation ===');
+  const savedFetch2 = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    content: [
+      { type: 'thinking', thinking: 'considering...' },
+      { type: 'text', text: 'Hello there.' }
+    ],
+    usage: { input_tokens: 10, output_tokens: 4 },
+    model: 'claude-opus-5',
+    stop_reason: 'end_turn'
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  r = await worker.fetch(req('/api/chat', {
+    headers: good,
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], model: 'claude-opus-5' })
+  }), ENV3);
+  const abody = await r.json();
+  check('content blocks flattened into reply', abody.reply === 'Hello there.', abody.reply);
+  check('thinking block surfaced as reasoning', abody.reasoning === 'considering...');
+  check('usage mapped to the common shape',
+        abody.usage.prompt_tokens === 10 && abody.usage.completion_tokens === 4 && abody.usage.total_tokens === 14,
+        JSON.stringify(abody.usage));
+
+  // A refusal is a 200 with no usable content — must not look like success.
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    content: [], stop_reason: 'refusal', model: 'claude-opus-5'
+  }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  r = await worker.fetch(req('/api/chat', {
+    headers: good,
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], model: 'claude-opus-5' })
+  }), ENV3);
+  check('refusal surfaced rather than an empty reply', (await r.json()).error !== undefined);
+  globalThis.fetch = savedFetch2;
+
+  console.log('\n=== Anthropic streaming translation ===');
+  const sse = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"model":"claude-opus-5"}}',
+    '',
+    'event: content_block_start',
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}',
+    '',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}',
+    '',
+    'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hel"}}',
+    '',
+    'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"lo"}}',
+    '',
+    'data: {"type":"message_stop"}',
+    ''
+  ].join('\n');
+
+  const savedFetch3 = globalThis.fetch;
+  globalThis.fetch = async () => new Response(sse, {
+    status: 200, headers: { 'Content-Type': 'text/event-stream' }
+  });
+  r = await worker.fetch(req('/api/chat', {
+    headers: good,
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], model: 'claude-opus-5', stream: true })
+  }), ENV3);
+  check('streaming response passes through as SSE',
+        (r.headers.get('content-type') || '').includes('text/event-stream'));
+  const streamed = await r.text();
+  globalThis.fetch = savedFetch3;
+
+  // Parse it exactly the way the browser client does.
+  const pieces = [];
+  const reasoningPieces = [];
+  let sawDone = false;
+  for (const line of streamed.split('\n')) {
+    const t = line.trim();
+    if (!t.startsWith('data:')) continue;
+    const p = t.slice(5).trim();
+    if (p === '[DONE]') { sawDone = true; continue; }
+    const j = JSON.parse(p);
+    const d = j.choices?.[0]?.delta || {};
+    if (d.content) pieces.push(d.content);
+    if (d.reasoning_content) reasoningPieces.push(d.reasoning_content);
+  }
+  check('text deltas translated to OpenAI shape', pieces.join('') === 'Hello', pieces.join(''));
+  check('thinking deltas translated to reasoning_content', reasoningPieces.join('') === 'hmm');
+  check('stream terminated with [DONE]', sawDone);
+
   console.log('\n=== /api/models ===');
   r = await call2('/api/models', { headers: good });
   check('models endpoint requires no extra setup', r.status === 200, 'got ' + r.status);
@@ -383,6 +520,68 @@ const req = (p, opts = {}) => {
   check('reply content preserved on fallback', (await r.json()).reply === 'non-streamed reply');
   globalThis.fetch = savedFetch;
   upstreamMode = 'ok';
+
+  console.log('\n=== Sync storage ===');
+  // Minimal in-memory KV stand-in.
+  const kv = new Map();
+  const ENV_KV = {
+    ...ENV,
+    SYNC: {
+      get: async (k, type) => {
+        const v = kv.get(k);
+        if (v === undefined) return null;
+        return type === 'json' ? JSON.parse(v) : v;
+      },
+      put: async (k, v) => { kv.set(k, v); }
+    }
+  };
+  const sync = (payload, env2 = ENV_KV, headers = good) =>
+    worker.fetch(req('/api/sync', { headers, body: JSON.stringify(payload) }), env2);
+
+  r = await sync({ op: 'pull' }, ENV);
+  check('sync reports unconfigured without a KV binding', r.status === 501, 'got ' + r.status);
+  check('unconfigured message names the binding', (await r.json()).error.includes('SYNC'));
+
+  r = await sync({ op: 'pull' }, ENV_KV, {});
+  check('sync requires authentication', r.status === 401);
+
+  r = await sync({ op: 'pull' });
+  const empty = await r.json();
+  check('first pull returns an empty state', empty.version === 0 && Object.keys(empty.branches).length === 0);
+
+  r = await sync({ op: 'push', baseVersion: 0, state: {
+    branches: { a: { name: 'A', messages: [{ role: 'user', content: 'hi' }], updatedAt: 100 } },
+    trash: []
+  }});
+  check('push accepted', r.status === 200, 'got ' + r.status);
+  check('push bumps the version', (await r.json()).version === 1);
+
+  r = await sync({ op: 'pull' });
+  const pulled = await r.json();
+  check('pull returns what was pushed', pulled.branches.a.messages[0].content === 'hi');
+  check('pulled state carries the version', pulled.version === 1);
+
+  // A second device pushing from a stale read must be told, not silently win.
+  r = await sync({ op: 'push', baseVersion: 0, state: { branches: {}, trash: [] } });
+  check('stale push rejected with 409', r.status === 409, 'got ' + r.status);
+  const conflict = await r.json();
+  check('conflict returns the current version', conflict.version === 1);
+  check('conflict returns the winning state so the client can re-merge',
+        conflict.state.branches.a !== undefined);
+
+  r = await sync({ op: 'pull' });
+  check('rejected push did not overwrite', (await r.json()).branches.a !== undefined);
+
+  r = await sync({ op: 'push', baseVersion: 1, state: { branches: { a: { name: 'A2', messages: [], updatedAt: 200 } }, trash: [] } });
+  check('push with the current version succeeds', r.status === 200);
+
+  r = await sync({ op: 'push', state: { branches: {}, trash: [] } });
+  check('push without baseVersion is allowed (force)', r.status === 200);
+
+  r = await sync({ op: 'nonsense' });
+  check('unknown sync op rejected', r.status === 400);
+  r = await sync({ op: 'push' });
+  check('push without state rejected', r.status === 400);
 
   console.log('\n=== Rate limiting ===');
   let limited = false;

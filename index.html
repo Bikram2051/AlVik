@@ -1606,6 +1606,14 @@ button.model-pill:hover::before { background: #fff; }
         <input type="file" id="importFile" accept="application/json,.json" style="display:none" />
         <div class="hint">Backups include every conversation and can be re-imported on any device.</div>
       </div>
+      <div class="modal-section">Sync</div>
+      <div class="field">
+        <div class="data-actions">
+          <button class="btn btn-ghost" id="syncNowBtn">Sync now</button>
+        </div>
+        <div class="hint" id="syncStatus">Checking…</div>
+      </div>
+
       <div class="modal-section">Recently deleted</div>
       <div class="field">
         <div class="trash-list" id="trashList"></div>
@@ -1659,14 +1667,17 @@ const MODELS = [
   { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner', provider: 'deepseek', providerLabel: 'DeepSeek',
     reasoning: ['low', 'medium', 'high'], defaultReasoning: 'high' },
   { id: 'deepseek-chat',     label: 'DeepSeek Chat',     provider: 'deepseek', providerLabel: 'DeepSeek',
-    reasoning: null }
+    reasoning: null },
+  { id: 'claude-opus-5',     label: 'Claude Opus 5',     provider: 'anthropic', providerLabel: 'Anthropic',
+    reasoning: ['low', 'medium', 'high', 'xhigh', 'max'], defaultReasoning: 'high', available: false }
 ];
 
 // Populated from /api/models after sign-in.
 let modelCatalog = MODELS.slice();
 let providerCatalog = [
-  { id: 'deepseek', label: 'DeepSeek', available: true,  keyEnv: 'DEEPSEEK_API_KEY' },
-  { id: 'openai',   label: 'OpenAI',   available: false, keyEnv: 'OPENAI_API_KEY' }
+  { id: 'deepseek',  label: 'DeepSeek',  available: true,  keyEnv: 'DEEPSEEK_API_KEY' },
+  { id: 'openai',    label: 'OpenAI',    available: false, keyEnv: 'OPENAI_API_KEY' },
+  { id: 'anthropic', label: 'Anthropic', available: false, keyEnv: 'ANTHROPIC_API_KEY' }
 ];
 
 function modelSpec(id) {
@@ -1917,6 +1928,14 @@ try {
 } catch { branches = {}; }
 let activeBranchId = localStorage.getItem(STORE_KEYS.active) || null;
 
+// Declared before the bootstrapping below, which persists state and can
+// therefore reach scheduleSync() — a `let` read before this point is a
+// temporal-dead-zone error, unlike the hoisted function declarations.
+let syncVersion = 0;
+let syncState = 'idle';        // idle | syncing | offline | error | disabled
+let syncTimer = null;
+let syncInFlight = false;
+
 // Deleted conversations are kept here so an accidental delete is recoverable.
 const TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;  // 30 days
 const TRASH_MAX_ENTRIES  = 50;
@@ -2104,7 +2123,7 @@ async function typesetMath(el, sourceText) {
 // ============================================================
 // HELPERS
 // ============================================================
-function persistBranches() {
+function persistBranches({ sync = true } = {}) {
   try {
     localStorage.setItem(STORE_KEYS.branches, JSON.stringify(branches));
     localStorage.setItem(STORE_KEYS.active, activeBranchId);
@@ -2112,6 +2131,8 @@ function persistBranches() {
     console.error('Persist failed:', e);
     showToast('Storage is full — export a backup and delete old chats');
   }
+  // Local storage is the source of truth; the push is best-effort.
+  if (sync && typeof scheduleSync === 'function') scheduleSync();
 }
 
 function persistTrash() {
@@ -2188,6 +2209,148 @@ function ensureAtLeastOneBranch() {
     }
   }
   messages = branches[activeBranchId].messages;
+}
+
+// ============================================================
+// CROSS-DEVICE SYNC
+//
+// Single user, many devices. The Worker stores one state blob with a
+// version; merging happens here so the server stays dumb.
+//
+// Merge rules, in order:
+//   1. A branch present on one side only is kept.
+//   2. A branch on both sides resolves to the newer updatedAt.
+//   3. A deletion is a tombstone in the trash. A branch is dropped when a
+//      tombstone for it is newer than the branch's own updatedAt — that is
+//      what stops a stale device from resurrecting a chat deleted elsewhere.
+// ============================================================
+function mergeSyncState(remote) {
+  const merged = { ...branches };
+
+  for (const [id, rb] of Object.entries(remote.branches || {})) {
+    if (!rb || !Array.isArray(rb.messages)) continue;
+    const local = merged[id];
+    if (!local || (rb.updatedAt || 0) > (local.updatedAt || 0)) {
+      merged[id] = {
+        name: typeof rb.name === 'string' ? rb.name : 'Imported chat',
+        messages: rb.messages,
+        createdAt: Number(rb.createdAt) || Date.now(),
+        updatedAt: Number(rb.updatedAt) || Date.now(),
+        pinned: !!rb.pinned
+      };
+    }
+  }
+
+  // Union of tombstones from both sides, newest per id.
+  const tombstones = new Map();
+  for (const e of [...(remote.trash || []), ...trash]) {
+    if (!e || !e.id) continue;
+    const prev = tombstones.get(e.id);
+    if (!prev || (e.deletedAt || 0) > (prev.deletedAt || 0)) tombstones.set(e.id, e);
+  }
+
+  for (const [id, tomb] of tombstones) {
+    const b = merged[id];
+    if (b && (tomb.deletedAt || 0) > (b.updatedAt || 0)) delete merged[id];
+  }
+
+  const mergedTrash = [...tombstones.values()]
+    .filter(e => Array.isArray(e.messages))
+    .sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0))
+    .slice(0, TRASH_MAX_ENTRIES);
+
+  return { branches: merged, trash: mergedTrash };
+}
+
+async function syncCall(payload) {
+  const res = await fetch(`${PROXY_URL}/api/sync`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${authToken() || ''}`
+    },
+    body: JSON.stringify(payload)
+  });
+  const data = await res.json().catch(() => ({}));
+  return { res, data };
+}
+
+// Pull, merge, push. Safe to call repeatedly; overlapping calls are dropped.
+async function syncNow({ silent = true } = {}) {
+  if (syncInFlight || !authToken()) return;
+  syncInFlight = true;
+  setSyncState('syncing');
+  try {
+    const { res, data } = await syncCall({ op: 'pull' });
+    if (res.status === 501) { setSyncState('disabled'); return; }
+    if (!res.ok) { setSyncState('error'); if (!silent) showToast(data.error || 'Sync failed'); return; }
+
+    const merged = mergeSyncState(data);
+    const changed = JSON.stringify(merged.branches) !== JSON.stringify(branches);
+
+    branches = merged.branches;
+    trash = merged.trash;
+    ensureAtLeastOneBranch();
+    persistBranches();
+    persistTrash();
+    if (changed) { renderSidebar(); renderMessages(); updateTopbar(); renderTrash(); }
+
+    const push = await syncCall({
+      op: 'push',
+      baseVersion: data.version || 0,
+      state: { branches, trash }
+    });
+    if (push.res.status === 409) {
+      // Another device wrote between our pull and push — retry once with
+      // the state they just returned.
+      const remerged = mergeSyncState(push.data.state || {});
+      branches = remerged.branches;
+      trash = remerged.trash;
+      ensureAtLeastOneBranch();
+      persistBranches();
+      persistTrash();
+      renderSidebar(); renderMessages(); updateTopbar();
+      const retry = await syncCall({
+        op: 'push', baseVersion: push.data.version, state: { branches, trash }
+      });
+      if (!retry.res.ok) { setSyncState('error'); return; }
+      syncVersion = retry.data.version;
+    } else if (!push.res.ok) {
+      setSyncState('error');
+      if (!silent) showToast(push.data.error || 'Sync failed');
+      return;
+    } else {
+      syncVersion = push.data.version;
+    }
+
+    setSyncState('idle');
+    if (!silent) showToast('Synced');
+  } catch {
+    setSyncState(navigator.onLine === false ? 'offline' : 'error');
+    if (!silent) showToast('Could not reach the sync service');
+  } finally {
+    syncInFlight = false;
+  }
+}
+
+// Coalesce bursts of edits into one push.
+function scheduleSync() {
+  if (syncState === 'disabled') return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => syncNow({ silent: true }), 3000);
+}
+
+function setSyncState(state) {
+  syncState = state;
+  const el = document.getElementById('syncStatus');
+  if (!el) return;
+  el.textContent = {
+    idle: 'Synced across your devices',
+    syncing: 'Syncing…',
+    offline: 'Offline — will sync when the connection returns',
+    error: 'Sync failed — history is still safe in this browser',
+    disabled: 'Not enabled. Bind a KV namespace as SYNC on the Worker to turn on cross-device history.'
+  }[state] || '';
 }
 
 function refreshAfterRestore() {
@@ -3831,6 +3994,14 @@ function relativeDay(ts) {
   return `${days} days ago`;
 }
 
+document.getElementById('syncNowBtn').addEventListener('click', () => syncNow({ silent: false }));
+
+// Push anything queued before the tab goes away, and re-sync on return.
+window.addEventListener('online', () => { if (syncState !== 'disabled') syncNow({ silent: true }); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && syncState !== 'disabled') syncNow({ silent: true });
+});
+
 document.getElementById('restoreAllBtn').addEventListener('click', () => {
   if (trash.length === 0) { showToast('Nothing to restore'); return; }
   const stamps = trash.map(e => e.deletedAt).reverse();  // oldest first
@@ -3949,6 +4120,7 @@ const REASONING_LABELS = {
   low: 'Low — quick answers',
   medium: 'Medium — balanced',
   high: 'High — think hard',
+  xhigh: 'Very high — best for coding',
   max: 'Max — think longest'
 };
 
@@ -4208,6 +4380,7 @@ function init() {
   updateModelPill();
   updateOnlineState();
   refreshModelCatalog();   // async; the built-in list works until it lands
+  syncNow({ silent: true });   // pull other devices' history on open
   renderSidebar();
   renderMessages();
   renderTrash();

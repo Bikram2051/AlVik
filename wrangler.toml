@@ -20,6 +20,15 @@ compatibility_date = "2026-08-07"
 [vars]
 ALLOWED_ORIGINS = "https://bikram2051.github.io"
 
+# Cross-device chat history. Create the namespace once, then paste its id here:
+#   npx wrangler kv namespace create SYNC
+# Or in the dashboard: Storage & Databases -> KV -> Create, then bind it to
+# this Worker as SYNC. Without this binding the app still works — it just
+# keeps history per-browser and /api/sync reports that it is unconfigured.
+# [[kv_namespaces]]
+# binding = "SYNC"
+# id = "<your namespace id>"
+
 # Secrets are set in the Cloudflare dashboard (Settings -> Variables and
 # Secrets) or with `wrangler secret put NAME`, which prompts for the value.
 # Never write real values in this file — it is public.

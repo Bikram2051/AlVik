@@ -132,6 +132,15 @@ when you send.
 | `deepseek-v4-pro` | DeepSeek | low / medium / high (default: high) |
 | `deepseek-reasoner` | DeepSeek | low / medium / high (default: high) |
 | `deepseek-chat` | DeepSeek | — |
+| `claude-opus-5` | Anthropic | low / medium / high / xhigh / max (default: high) |
+
+Anthropic's Messages API is **not** OpenAI-compatible, so the Worker
+translates for it: `x-api-key` instead of a bearer token, the required
+`anthropic-version` header, the system prompt lifted to a top-level field,
+`max_tokens` supplied (it is mandatory there), `output_config.effort`
+instead of `reasoning_effort`, no `temperature` (rejected on Opus 5), and
+the `content[]` block response and its SSE events rewritten into the
+OpenAI-compatible shape the browser already parses.
 
 **Any other model:** choose **Custom model ID…**, pick the provider, and
 enter the exact id from that provider's API docs. Marketing names ("GPT
@@ -190,6 +199,39 @@ Every push to `main` republishes automatically.
 `.github/workflows/ci.yml` runs on each push and **fails the build if a
 password constant or an API key ever reappears in `index.html`**, so the
 old client-side-secret mistake cannot ship again.
+
+## Cross-device sync
+
+Sign in on any device and your chat history follows you. History still lives
+in `localStorage` — sync mirrors it to a Cloudflare KV namespace so other
+devices can pull it, so the app keeps working unchanged when sync is off or
+unreachable.
+
+**Enable it once:**
+
+```bash
+npx wrangler kv namespace create SYNC
+```
+
+Uncomment the `[[kv_namespaces]]` block in `wrangler.toml`, paste the id it
+prints, and redeploy. Dashboard equivalent: **Storage & Databases → KV →
+Create**, then bind it to the Worker as `SYNC`. Until then the app runs
+per-browser and Settings → Sync says so rather than failing silently.
+
+**How merging works.** The Worker stores one versioned blob and does no
+merging; the client resolves:
+
+1. A chat on only one device is kept.
+2. A chat on both resolves to the newer `updatedAt`.
+3. Deletions are tombstones. A chat is dropped when its tombstone is newer
+   than the chat's own `updatedAt` — that is what stops a device that has
+   been offline from resurrecting something you deleted elsewhere, while
+   still letting an edit made *after* a delete win.
+
+A push built on a stale read is rejected with a `409` carrying the winning
+state, and the client re-merges and retries rather than overwriting. Syncs
+run on open, on reconnect, when the tab regains focus, and ~3s after an
+edit; **Settings → Sync now** forces one.
 
 ## Security model
 

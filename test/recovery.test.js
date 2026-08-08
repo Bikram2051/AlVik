@@ -205,6 +205,54 @@ waitFor(win3, 'trash.length === 1')
     win6.document.getElementById('toast').querySelector('.toast-action').click();
     check('sole chat recoverable via Undo', win6.eval(`!!branches['solo'] && branches['solo'].messages[0].content === 'important'`));
 
+    console.log('\n=== Scenario 9: cross-device merge ===');
+    const win7 = boot();
+    const mergeWith = (localBranches, localTrash, remote) => JSON.parse(win7.eval(`
+      branches = ${JSON.stringify(localBranches)};
+      trash = ${JSON.stringify(localTrash)};
+      activeBranchId = Object.keys(branches)[0] || null;
+      JSON.stringify(mergeSyncState(${JSON.stringify(remote)}));
+    `));
+    const br = (name, updatedAt, msgs = []) =>
+      ({ name, messages: msgs, createdAt: 1, updatedAt, pinned: false });
+
+    let m = mergeWith(
+      { local: br('Local', 100, [{ role: 'user', content: 'l' }]) }, [],
+      { branches: { remote: br('Remote', 200, [{ role: 'user', content: 'r' }]) }, trash: [] });
+    check('remote-only chat is adopted', !!m.branches.remote);
+    check('local-only chat is kept', !!m.branches.local);
+
+    m = mergeWith({ x: br('Old', 100) }, [], { branches: { x: br('New', 500) }, trash: [] });
+    check('newer remote edit wins', m.branches.x.name === 'New', m.branches.x.name);
+
+    m = mergeWith({ x: br('Newer local', 900) }, [], { branches: { x: br('Older remote', 100) }, trash: [] });
+    check('newer local edit is not clobbered', m.branches.x.name === 'Newer local');
+
+    // The one that matters: a delete on another device must stick.
+    m = mergeWith(
+      { gone: br('Gone', 100, [{ role: 'user', content: 'g' }]) }, [],
+      { branches: {}, trash: [{ id: 'gone', name: 'Gone', messages: [{ role: 'user', content: 'g' }], deletedAt: 300 }] });
+    check('remote deletion removes the local copy', !m.branches.gone);
+    check('the deleted chat lands in trash, not oblivion', m.trash.some(e => e.id === 'gone'));
+
+    // ...but an edit made after that delete should survive it.
+    m = mergeWith(
+      { kept: br('Edited after delete', 900) }, [],
+      { branches: {}, trash: [{ id: 'kept', name: 'Kept', messages: [], deletedAt: 300 }] });
+    check('an edit newer than the tombstone wins', !!m.branches.kept);
+
+    // A local deletion must not be undone by a stale remote copy.
+    m = mergeWith(
+      {}, [{ id: 'del', name: 'Deleted here', messages: [], deletedAt: 800 }],
+      { branches: { del: br('Deleted here', 100) }, trash: [] });
+    check('local deletion is not resurrected by a stale remote', !m.branches.del);
+
+    m = mergeWith({}, [], { branches: {}, trash: [] });
+    check('empty merge is safe', Object.keys(m.branches).length === 0 && m.trash.length === 0);
+
+    m = mergeWith({ a: br('A', 1) }, [], { branches: { bad: { name: 'no messages array' } }, trash: [] });
+    check('malformed remote branch ignored', !m.branches.bad && !!m.branches.a);
+
     console.log(`\n${'='.repeat(46)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(46)}`);
     process.exit(fail ? 1 : 0);
   })

@@ -42,18 +42,35 @@
 // `provider` and it is passed straight through (see resolveModel).
 // ============================================================
 
+// `dialect` selects the request/response translation. 'openai' is the
+// OpenAI-compatible shape most providers speak; 'anthropic' is the Messages
+// API, which differs in auth header, system prompt placement, response
+// shape, and streaming events — see toAnthropicRequest//fromAnthropic*.
 const PROVIDERS = {
   deepseek: {
     url: 'https://api.deepseek.com/chat/completions',
     keyEnv: 'DEEPSEEK_API_KEY',
-    label: 'DeepSeek'
+    label: 'DeepSeek',
+    dialect: 'openai'
   },
   openai: {
     url: 'https://api.openai.com/v1/chat/completions',
     keyEnv: 'OPENAI_API_KEY',
-    label: 'OpenAI'
+    label: 'OpenAI',
+    dialect: 'openai'
+  },
+  anthropic: {
+    url: 'https://api.anthropic.com/v1/messages',
+    keyEnv: 'ANTHROPIC_API_KEY',
+    label: 'Anthropic',
+    dialect: 'anthropic'
   }
 };
+
+// Anthropic requires max_tokens; there is no "provider default" to fall back
+// on, so a request without one needs a value supplied here.
+const ANTHROPIC_VERSION = '2023-06-01';
+const ANTHROPIC_DEFAULT_MAX_TOKENS = 8192;
 
 // Per-model behaviour. Providers disagree on these details, and getting
 // them wrong is a 400 from upstream, so they are data rather than logic:
@@ -76,6 +93,14 @@ const MODELS = {
   'deepseek-chat': {
     provider: 'deepseek', label: 'DeepSeek Chat',
     reasoning: null, maxTokensParam: 'max_tokens', allowTemperature: true
+  },
+  // Thinking is on by default on Opus 5 and `budget_tokens` is rejected, so
+  // the worker never sends one. Effort maps to output_config.effort, and a
+  // custom temperature is rejected outright.
+  'claude-opus-5': {
+    provider: 'anthropic', label: 'Claude Opus 5',
+    reasoning: ['low', 'medium', 'high', 'xhigh', 'max'], defaultReasoning: 'high',
+    thinkingExtraBody: false, maxTokensParam: 'max_tokens', allowTemperature: false
   }
 };
 
@@ -139,6 +164,7 @@ export default {
 
     if (path === '/api/login') return handleLogin(request, env, cors);
     if (path === '/api/models') return handleModels(request, env, cors);
+    if (path === '/api/sync') return handleSync(request, env, cors);
     if (path === '/api/chat' || path === '/') return handleChat(request, env, cors);
 
     return json({ error: 'Not found' }, 404, cors);
@@ -230,6 +256,74 @@ async function handleModels(request, env, cors) {
   return json({ models, providers, defaultModel: DEFAULT_MODEL }, 200, cors);
 }
 
+// ---------------------------------------------------------------- sync
+
+// Cross-device chat history. This is a single-user app, so the whole state
+// lives under one key; the client owns merging and the Worker only stores
+// what it is given, with a version for optimistic concurrency.
+const SYNC_KEY = 'alvik:state:v1';
+const SYNC_MAX_BYTES = 20_000_000;   // KV caps values at 25 MB
+
+async function handleSync(request, env, cors) {
+  if (!(await isAuthed(request, env))) {
+    return json({ error: 'Not authenticated' }, 401, cors);
+  }
+  if (!env.SYNC) {
+    return json({
+      error: 'Sync is not configured. Create a KV namespace and bind it as SYNC on the Worker to enable cross-device history.',
+      configured: false
+    }, 501, cors);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: 'Invalid JSON' }, 400, cors);
+  }
+
+  if (body.op === 'pull') {
+    const stored = await env.SYNC.get(SYNC_KEY, 'json');
+    return json(stored || { version: 0, updatedAt: 0, branches: {}, trash: [] }, 200, cors);
+  }
+
+  if (body.op === 'push') {
+    if (typeof body.state !== 'object' || body.state === null) {
+      return json({ error: '"state" object is required' }, 400, cors);
+    }
+    const current = await env.SYNC.get(SYNC_KEY, 'json');
+    const currentVersion = current ? (current.version || 0) : 0;
+
+    // Reject a push built on a stale read so the client re-merges rather
+    // than silently overwriting another device's newer history.
+    if (Number.isFinite(body.baseVersion) && body.baseVersion !== currentVersion) {
+      return json({
+        error: 'Sync conflict — another device wrote first.',
+        conflict: true,
+        version: currentVersion,
+        state: current
+      }, 409, cors);
+    }
+
+    const next = {
+      version: currentVersion + 1,
+      updatedAt: Date.now(),
+      branches: body.state.branches && typeof body.state.branches === 'object' ? body.state.branches : {},
+      trash: Array.isArray(body.state.trash) ? body.state.trash : []
+    };
+
+    const serialized = JSON.stringify(next);
+    if (serialized.length > SYNC_MAX_BYTES) {
+      return json({ error: 'History is too large to sync. Export a backup and clear old chats.' }, 413, cors);
+    }
+
+    await env.SYNC.put(SYNC_KEY, serialized);
+    return json({ ok: true, version: next.version, updatedAt: next.updatedAt }, 200, cors);
+  }
+
+  return json({ error: 'Unknown sync operation. Use "pull" or "push".' }, 400, cors);
+}
+
 // ---------------------------------------------------------------- chat
 
 async function isAuthed(request, env) {
@@ -300,14 +394,22 @@ async function handleChat(request, env, cors) {
     if (spec.thinkingExtraBody) payload.extra_body = { thinking: { type: 'enabled' } };
   }
 
-  const callUpstream = (p) => fetch(provider.url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${apiKey}`
-    },
-    body: JSON.stringify(p)
-  });
+  const anthropic = provider.dialect === 'anthropic';
+
+  const callUpstream = (p) => {
+    const wire = anthropic ? toAnthropicRequest(p, spec) : p;
+    const headers = anthropic
+      ? {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': ANTHROPIC_VERSION
+        }
+      : {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        };
+    return fetch(provider.url, { method: 'POST', headers, body: JSON.stringify(wire) });
+  };
 
   let upstream;
   try {
@@ -338,7 +440,10 @@ async function handleChat(request, env, cors) {
   }
 
   if (payload.stream) {
-    return new Response(upstream.body, {
+    // Anthropic's event stream is rewritten into the OpenAI-compatible shape
+    // so the browser only ever needs one SSE parser.
+    const stream = anthropic ? anthropicStreamToOpenAI(upstream.body) : upstream.body;
+    return new Response(stream, {
       status: 200,
       headers: {
         ...cors,
@@ -350,6 +455,9 @@ async function handleChat(request, env, cors) {
   }
 
   const data = await upstream.json();
+  if (anthropic) {
+    return json(fromAnthropicResponse(data), 200, cors);
+  }
   const msg = data.choices?.[0]?.message || {};
   return json({
     reply: msg.content ?? '',
@@ -357,6 +465,116 @@ async function handleChat(request, env, cors) {
     usage: data.usage,
     model: data.model
   }, 200, cors);
+}
+
+// ---------------------------------------------------------------- anthropic
+
+// The Messages API is not OpenAI-compatible. Differences that matter:
+//   - auth is x-api-key plus a required anthropic-version header
+//   - the system prompt is a top-level field, not a message with role system
+//   - max_tokens is required, not optional
+//   - thinking is configured with {type:'adaptive'}; budget_tokens is
+//     rejected on current models, as is a custom temperature
+//   - effort lives in output_config, not as reasoning_effort
+function toAnthropicRequest(payload, spec) {
+  // Anthropic takes the system prompt out of band; everything else stays a
+  // turn. Consecutive same-role turns are allowed, so no merging is needed.
+  const system = payload.messages
+    .filter(m => m.role === 'system')
+    .map(m => m.content)
+    .join('\n\n')
+    .trim();
+
+  const messages = payload.messages
+    .filter(m => m.role !== 'system')
+    .map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: m.content }));
+
+  const out = {
+    model: payload.model,
+    max_tokens: payload.max_tokens || ANTHROPIC_DEFAULT_MAX_TOKENS,
+    messages,
+    stream: !!payload.stream,
+    // display:'summarized' — the default omits the text entirely, which
+    // would render as a long silent pause in the thinking panel.
+    thinking: { type: 'adaptive', display: 'summarized' }
+  };
+  if (system) out.system = system;
+  if (spec.reasoning && payload.reasoning_effort) {
+    out.output_config = { effort: payload.reasoning_effort };
+  }
+  return out;
+}
+
+// content is an array of blocks, not a single string.
+function fromAnthropicResponse(data) {
+  const blocks = Array.isArray(data.content) ? data.content : [];
+  const reply = blocks.filter(b => b.type === 'text').map(b => b.text || '').join('');
+  const reasoning = blocks.filter(b => b.type === 'thinking').map(b => b.thinking || '').join('');
+
+  return {
+    reply,
+    ...(reasoning ? { reasoning } : {}),
+    usage: data.usage
+      ? {
+          prompt_tokens: data.usage.input_tokens,
+          completion_tokens: data.usage.output_tokens,
+          total_tokens: (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0)
+        }
+      : undefined,
+    model: data.model,
+    // A safety refusal is a successful 200 with no usable content; say so
+    // rather than handing the client an empty message.
+    ...(data.stop_reason === 'refusal'
+      ? { error: 'The model declined this request.', upstreamStatus: 200 }
+      : {})
+  };
+}
+
+// Rewrite the Anthropic event stream into the OpenAI-compatible SSE the
+// client already parses, so streaming works without a second client parser.
+function anthropicStreamToOpenAI(body) {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = '';
+  let closed = false;
+
+  const emit = (controller, delta) => {
+    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ choices: [{ delta }] })}\n\n`));
+  };
+
+  return body.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      buffer += decoder.decode(chunk, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;   // skip `event:` lines
+        let ev;
+        try {
+          ev = JSON.parse(line.slice(5).trim());
+        } catch {
+          continue;
+        }
+
+        if (ev.type === 'content_block_delta') {
+          const d = ev.delta || {};
+          if (d.type === 'text_delta' && d.text) emit(controller, { content: d.text });
+          else if (d.type === 'thinking_delta' && d.thinking) emit(controller, { reasoning_content: d.thinking });
+        } else if (ev.type === 'message_delta' && ev.delta?.stop_reason === 'refusal') {
+          emit(controller, { content: '\n\n⚠️ The model declined this request.' });
+        } else if (ev.type === 'message_stop' && !closed) {
+          closed = true;
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        } else if (ev.type === 'error') {
+          emit(controller, { content: `\n\n⚠️ ${ev.error?.message || 'Upstream stream error.'}` });
+        }
+      }
+    },
+    flush(controller) {
+      if (!closed) controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+    }
+  }));
 }
 
 // Translate an upstream failure into a status the client can act on.
