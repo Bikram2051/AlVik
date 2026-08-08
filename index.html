@@ -3275,7 +3275,9 @@ function buildApiMessages(msgs) {
 
 function httpErrorMessage(status) {
   if (status === 401) return 'Your session expired. Please sign in again.';
+  if (status === 402) return 'The provider account is out of credit. Top it up to continue.';
   if (status === 403) return 'This site is not allowed to call the proxy. Check ALLOWED_ORIGINS on the Worker.';
+  if (status === 503) return 'A provider API key is missing or was refused. Check the Worker\'s secrets.';
   if (status === 429) return 'Rate limited — too many requests. Please wait a moment.';
   if (status >= 500) return 'The proxy or upstream API had a server error.';
   return `Request failed with status ${status}.`;

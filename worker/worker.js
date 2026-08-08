@@ -329,11 +329,12 @@ async function handleChat(request, env, cors) {
   }
 
   if (!upstream.ok) {
-    const detail = (await upstream.text()).slice(0, 600);
-    // Never surface upstream 401s as 401 — that would make the client think
-    // the user's session expired and bounce them to the login screen.
-    const status = upstream.status === 429 ? 429 : 502;
-    return json({ error: `Upstream error ${upstream.status}`, detail }, status, cors);
+    return json(describeUpstreamFailure(
+      upstream.status,
+      (await upstream.text()).slice(0, 600),
+      provider,
+      model
+    ), mapUpstreamStatus(upstream.status), cors);
   }
 
   if (payload.stream) {
@@ -356,6 +357,64 @@ async function handleChat(request, env, cors) {
     usage: data.usage,
     model: data.model
   }, 200, cors);
+}
+
+// Translate an upstream failure into a status the client can act on.
+//
+// The distinction that matters is retryable vs not. A 402 is a billing
+// problem and a 400 is a bad request — retrying either just delays the
+// real message behind three rounds of backoff.
+//
+//   429 -> 429  rate limited, retry
+//   5xx -> 502  transient upstream fault, retry
+//   401/403 -> 503  our API key was refused; a configuration problem
+//   everything else -> passed through unchanged, not retried
+//
+// Upstream 401s are never surfaced as 401: the client reads that as "your
+// session expired" and would bounce the user to the sign-in screen over a
+// problem that has nothing to do with their session.
+function mapUpstreamStatus(status) {
+  if (status === 429) return 429;
+  if (status >= 500) return 502;
+  if (status === 401 || status === 403) return 503;
+  return status;
+}
+
+function describeUpstreamFailure(status, rawDetail, provider, model) {
+  // Providers nest the useful sentence inside {"error":{"message":"…"}}.
+  let detail = rawDetail;
+  try {
+    const parsed = JSON.parse(rawDetail);
+    const inner = parsed?.error?.message ?? parsed?.message;
+    if (typeof inner === 'string' && inner.trim()) detail = inner.trim();
+  } catch { /* not JSON — keep the raw text */ }
+
+  const name = provider.label;
+  let error;
+  switch (status) {
+    case 402:
+      error = `${name} rejected the request for billing reasons — the account behind ${provider.keyEnv} is out of credit. Top up with ${name}, then try again.`;
+      break;
+    case 401:
+    case 403:
+      error = `${name} refused the API key. Check ${provider.keyEnv} in the Worker's secrets — it may be wrong, revoked, or lacking access to "${model}".`;
+      break;
+    case 404:
+      error = `${name} does not recognise the model "${model}". Check the exact model id in ${name}'s API documentation.`;
+      break;
+    case 400:
+    case 422:
+      error = `${name} rejected the request for "${model}".`;
+      break;
+    case 429:
+      error = `${name} is rate limiting this key. Wait a moment and try again.`;
+      break;
+    default:
+      error = status >= 500
+        ? `${name} had a server error. This is usually temporary.`
+        : `${name} returned an error (${status}).`;
+  }
+  return { error, detail, upstreamStatus: status };
 }
 
 // Map a requested model onto a provider and a parameter profile.

@@ -202,6 +202,43 @@ const req = (p, opts = {}) => {
   check('upstream 429 surfaces as 429, not 401', r.status === 429, 'got ' + r.status);
   upstreamMode = 'ok';
 
+  console.log('\n=== Upstream failures are classified, not lumped together ===');
+  const upstreamFails = async (status, bodyText) => {
+    const saved = globalThis.fetch;
+    globalThis.fetch = async () => new Response(bodyText, { status });
+    const rr = await call('/api/chat', {
+      headers: good,
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], model: 'deepseek-v4-pro' })
+    });
+    globalThis.fetch = saved;
+    return { status: rr.status, body: await rr.json() };
+  };
+
+  // The real failure seen in production: DeepSeek 402 Insufficient Balance.
+  let f = await upstreamFails(402, '{"error":{"message":"Insufficient Balance","type":"unknown_error"}}');
+  check('billing failure is not disguised as a server error', f.status === 402, 'got ' + f.status);
+  check('billing message says what to do', /out of credit|billing/i.test(f.body.error), f.body.error);
+  check('provider is named', f.body.error.includes('DeepSeek'));
+  check('the secret to check is named', f.body.error.includes('DEEPSEEK_API_KEY'));
+  check('nested provider message is unwrapped', f.body.detail === 'Insufficient Balance', f.body.detail);
+  check('original upstream status preserved', f.body.upstreamStatus === 402);
+
+  f = await upstreamFails(401, '{"error":{"message":"invalid api key"}}');
+  check('a refused key is never surfaced as 401', f.status !== 401, 'got ' + f.status);
+  check('a refused key reads as a configuration problem', f.status === 503, 'got ' + f.status);
+  check('refused-key message names the secret', f.body.error.includes('DEEPSEEK_API_KEY'));
+
+  f = await upstreamFails(404, '{"error":{"message":"model not found"}}');
+  check('unknown model passes 404 through', f.status === 404);
+  check('unknown-model message names the model', f.body.error.includes('deepseek-v4-pro'));
+
+  f = await upstreamFails(500, 'gateway blew up');
+  check('genuine upstream fault maps to 502', f.status === 502);
+  check('non-JSON detail is kept verbatim', f.body.detail === 'gateway blew up');
+
+  f = await upstreamFails(400, '{"error":{"message":"bad parameter"}}');
+  check('bad request passes 400 through, not retried as 5xx', f.status === 400);
+
   console.log('\n=== Input validation still enforced ===');
   r = await call('/api/chat', { headers: good, body: JSON.stringify({ messages: [] }) });
   check('empty messages rejected', r.status === 400);
