@@ -48,11 +48,18 @@ globalThis.fetch = async (url, init) => {
   }), { status: 200, headers: { 'Content-Type': 'application/json' } });
 };
 
-const req = (p, opts = {}) => new Request('https://alvik.example.workers.dev' + p, {
-  method: opts.method || 'POST',
-  headers: { 'Origin': opts.origin === undefined ? ORIGIN : opts.origin, ...(opts.headers || {}) },
-  body: opts.body
-});
+// Pass `origin: null` to send no Origin header at all — that is what a
+// non-browser client (curl, PowerShell, a native app) actually does.
+const req = (p, opts = {}) => {
+  const headers = { ...(opts.headers || {}) };
+  const origin = opts.origin === undefined ? ORIGIN : opts.origin;
+  if (origin) headers['Origin'] = origin;
+  return new Request('https://alvik.example.workers.dev' + p, {
+    method: opts.method || 'POST',
+    headers,
+    body: opts.body
+  });
+};
 
 (async () => {
   const mod = await import('file://' + tmp);
@@ -158,7 +165,28 @@ const req = (p, opts = {}) => new Request('https://alvik.example.workers.dev' + 
 
   console.log('\n=== CORS lockdown ===');
   r = await call('/api/chat', { origin: 'https://evil.example.com', headers: good, body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }) });
-  check('foreign origin blocked with 403', r.status === 403, 'got ' + r.status);
+  check('foreign browser origin blocked with 403', r.status === 403, 'got ' + r.status);
+
+  // Non-browser clients send no Origin at all. CORS is a browser mechanism,
+  // so refusing these breaks curl/scripts/native apps without adding any
+  // protection — the bearer token is the real gate.
+  r = await call('/api/login', { origin: null, body: JSON.stringify({ password: ENV.APP_PASSWORD }) });
+  check('client with no Origin can log in', r.status === 200, 'got ' + r.status);
+  const cliToken = (await r.json()).token;
+  check('and receives a usable token', typeof cliToken === 'string' && cliToken.length > 20);
+
+  upstreamCalls = [];
+  r = await call('/api/chat', {
+    origin: null,
+    headers: { 'Authorization': `Bearer ${cliToken}` },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] })
+  });
+  check('client with no Origin can chat', r.status === 200, 'got ' + r.status);
+  check('no-Origin request still requires a valid token',
+        (await call('/api/chat', { origin: null, body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }) })).status === 401);
+
+  r = await call('/api/health', { method: 'GET', origin: null });
+  check('health reachable without an Origin', r.status === 200);
 
   r = await call('/api/health', { method: 'GET' });
   check('allowed origin echoed in CORS header', r.headers.get('Access-Control-Allow-Origin') === ORIGIN);

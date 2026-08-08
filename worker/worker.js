@@ -477,12 +477,20 @@ function corsHeaders(request, env) {
     .filter(Boolean);
 
   let allowOrigin;
-  if (allowed.length === 0) {
+  if (!origin) {
+    // No Origin header means this is not a browser cross-origin request —
+    // curl, a script, a native app. ALLOWED_ORIGINS exists to stop another
+    // *website* from spending your credits through a visitor's browser, and
+    // only browsers send Origin. Blocking these would break legitimate
+    // tooling while adding nothing: anyone using curl can set any Origin
+    // they like. The bearer token is what actually guards this endpoint.
+    allowOrigin = '*';
+  } else if (allowed.length === 0) {
     allowOrigin = '*';
   } else if (allowed.includes(origin)) {
     allowOrigin = origin;
   } else {
-    return null; // signals "origin not allowed"
+    return null; // a real browser request from a site that is not permitted
   }
 
   return {
